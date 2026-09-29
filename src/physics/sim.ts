@@ -28,6 +28,14 @@ export interface SimEvent {
   x: number;
   y: number;
   note?: string;
+  /** Piece that caused the event, for render reactions. */
+  uid?: string;
+  /** Ball involved, for render reactions. */
+  ball?: string;
+  /** Contact normal and impact speed, for squash. */
+  nx?: number;
+  ny?: number;
+  impact?: number;
 }
 
 export interface Sample {
@@ -44,6 +52,8 @@ export interface SimState {
   phase: 'running' | 'won' | 'lost';
   reason: string;
   events: SimEvent[];
+  /** Total events ever pushed. The events list is a ring, so readers track this instead of an index. */
+  eventCount: number;
   sleep: number;
   closest: number;
   maxSpeed: number;
@@ -99,6 +109,7 @@ export function createState(level: SimLevel): SimState {
     phase: 'running',
     reason: '',
     events: [],
+    eventCount: 0,
     sleep: 0,
     closest: Infinity,
     maxSpeed: 0,
@@ -184,7 +195,7 @@ function updateGoals(level: SimLevel, state: SimState): void {
       state.closest = Math.min(state.closest, d);
       if (d <= goal.r) {
         state.goalsMet.push(goal.id);
-        pushEvent(state, { t: state.t, kind: 'goal', x: ball.x, y: ball.y });
+        pushEvent(state, { t: state.t, kind: 'goal', x: ball.x, y: ball.y, ball: ball.id, uid: goal.id });
         ball.vx *= 0.4;
         ball.vy *= 0.4;
       }
@@ -199,6 +210,7 @@ function updateGoals(level: SimLevel, state: SimState): void {
 function pushEvent(state: SimState, event: SimEvent): void {
   if (state.events.length > 48) state.events.shift();
   state.events.push(event);
+  state.eventCount += 1;
 }
 
 export function piecePose(piece: Piece, t: number, latched: readonly string[], broken: readonly string[]): PiecePose {
@@ -309,7 +321,7 @@ function resolveSolids(
     if (piece.kind === 'breakable' && -relN > (piece.props.threshold ?? 6)) {
       state.broken.push(piece.uid);
       pose.inactive = true;
-      pushEvent(state, { t: state.t, kind: 'break', x: ball.x, y: ball.y });
+      pushEvent(state, { t: state.t, kind: 'break', x: ball.x, y: ball.y, uid: piece.uid, ball: ball.id, nx, ny, impact: -relN });
       continue;
     }
 
@@ -323,14 +335,16 @@ function resolveSolids(
       const vn = ball.vx * nx + ball.vy * ny;
       ball.vx += (power - vn) * nx;
       ball.vy += (power - vn) * ny;
-      pushEvent(state, { t: state.t, kind: 'bounce', x: ball.x, y: ball.y, note: 'bouncer' });
+      pushEvent(state, { t: state.t, kind: 'bounce', x: ball.x, y: ball.y, note: 'bouncer', uid: piece.uid, ball: ball.id, nx, ny, impact: Math.max(-relN, power * 0.6) });
     } else if (relN < 0) {
       const incoming = -relN;
       const mat = materialOf(piece);
       const e = incoming < REST_INCOMING ? 0 : mat.restitution;
       ball.vx += -(1 + e) * relN * nx;
       ball.vy += -(1 + e) * relN * ny;
-      if (incoming > 2.4) pushEvent(state, { t: state.t, kind: 'bounce', x: ball.x, y: ball.y });
+      if (incoming > 2.4) {
+        pushEvent(state, { t: state.t, kind: 'bounce', x: ball.x, y: ball.y, uid: piece.uid, ball: ball.id, nx, ny, impact: incoming });
+      }
       frict();
     } else {
       frict();
@@ -417,7 +431,7 @@ function sense(
     else if (piece.kind === 'switch') {
       if (!state.latched.includes(piece.uid)) {
         state.latched.push(piece.uid);
-        pushEvent(state, { t: state.t, kind: 'switch', x: piece.x, y: piece.y });
+        pushEvent(state, { t: state.t, kind: 'switch', x: piece.x, y: piece.y, uid: piece.uid, ball: ball.id });
       }
     } else if (piece.kind === 'portal') {
       const twin = level.pieces.find(
@@ -438,7 +452,7 @@ function sense(
       ball.y = twinPose.y + d.y * (twin.w / 2 + ball.r + 0.06);
       ball.ignore[piece.uid] = state.t + 0.35;
       ball.ignore[twin.uid] = state.t + 0.35;
-      pushEvent(state, { t: state.t, kind: 'portal', x: ball.x, y: ball.y });
+      pushEvent(state, { t: state.t, kind: 'portal', x: ball.x, y: ball.y, uid: twin.uid, note: piece.uid, ball: ball.id });
     }
   }
 }
@@ -458,7 +472,7 @@ function fireLauncher(
   ball.vy = d.y * power;
   ball.x = pose.x + d.x * (piece.w / 2 + ball.r + 0.03);
   ball.y = pose.y + d.y * (piece.w / 2 + ball.r + 0.03);
-  pushEvent(state, { t: state.t, kind, x: ball.x, y: ball.y });
+  pushEvent(state, { t: state.t, kind, x: ball.x, y: ball.y, uid: piece.uid, ball: ball.id, nx: d.x, ny: d.y, impact: power });
 }
 
 function overlaps(ball: SimBall, piece: Piece, pose: PiecePose): boolean {

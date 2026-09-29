@@ -6,7 +6,7 @@ import { dailyCard, dailyLevel, dayKey } from '../level/daily';
 import { cleanTitle, isClean } from '../level/moderate';
 import { parseLevel, validateBuild } from '../level/validate';
 import { knownKinds, workshopLevel } from '../level/workshop';
-import { medalNote, mergeMedals, rankTitle } from '../progress/medals';
+import { medalCount, medalNote, mergeMedals, rankTitle } from '../progress/medals';
 import { ensureRecord, freshSave, loadSave, writeSave, type SaveData } from '../progress/save';
 import { firstUnsolved, isLevelOpen, nextLinearId, secretFrom, totalMedals } from '../progress/unlock';
 import { remaining } from '../editor/budget';
@@ -15,7 +15,7 @@ import { createState, FIXED_DT, step, toSim, type SimState } from '../physics/si
 import { drawWorld } from '../render/draw';
 import { fitCamera, screenToWorld, type Camera } from '../render/camera';
 import { Shell, type PlayView, type ViewModel } from '../ui/shell';
-import { Session } from './session';
+import { emptyFx, Session } from './session';
 
 type Screen = ViewModel['screen'];
 
@@ -43,6 +43,7 @@ export class Game {
   private seenHints = 0;
   private winToken = '';
   private lastSpoken = '';
+  private visit = 0;
   private pointers = new Map<number, { x: number; y: number }>();
   private pinchDist = 0;
   private panning = false;
@@ -53,6 +54,7 @@ export class Game {
   private attractAcc = 0;
   private attractHold = 0;
   private attractCamera: Camera = fitCamera(this.attractLevel.view, 1280, 720);
+  private attractFx = emptyFx();
 
   constructor(root: HTMLElement) {
     this.save = loadSave();
@@ -168,6 +170,7 @@ export class Game {
         shake: 0,
         accent: '#C2410C',
         devText: '',
+        fx: this.attractFx,
       });
       return;
     }
@@ -179,7 +182,7 @@ export class Game {
         width: this.cssW,
         height: this.cssH,
         dpr: this.dpr,
-        camera: session.camera,
+        camera: session.viewCamera(),
         level: session.level,
         pieces: session.pieces,
         starts: session.starts,
@@ -203,6 +206,7 @@ export class Game {
         devText: this.dev
           ? `${this.fps.toFixed(0)} fps  ${session.mode}  ${session.sim?.phase ?? 'build'}  ${ball ? `${ball.vx.toFixed(1)}, ${ball.vy.toFixed(1)}` : ''}`
           : '',
+        fx: session.fx,
       });
       return;
     }
@@ -224,19 +228,25 @@ export class Game {
       hasProgress: this.hasProgress(),
       rank: rankTitle(medals),
       medalTotal: medals,
-      worlds: WORLDS.map((world) => {
-        const levels = levelsInWorld(world.id).filter((level) => !level.secret || isLevelOpen(level, this.save));
+      medalMax: LEVELS.length * 3,
+      worlds: WORLDS.map((world, worldIndex) => {
+        const all = levelsInWorld(world.id);
+        const levels = all.filter((level) => !level.secret || isLevelOpen(level, this.save));
         const open = levels.some((level) => isLevelOpen(level, this.save));
         return {
           id: world.id,
+          number: worldIndex + 1,
           kicker: world.kicker,
           name: world.name,
           lesson: world.lesson,
           accent: world.accent,
           open,
+          earned: all.reduce((sum, level) => sum + medalCount(this.save.levels[level.id]), 0),
+          total: all.filter((level) => !level.secret).length * 3,
           levels: open
-            ? levels.map((level) => ({
+            ? levels.map((level, levelIndex) => ({
                 id: level.id,
+                number: levelIndex + 1,
                 name: level.name,
                 summary: level.summary,
                 open: isLevelOpen(level, this.save),
@@ -252,6 +262,7 @@ export class Game {
       daily: { name: daily.name, blurb: daily.blurb, open: daily.open, done: daily.done },
       play,
       notes: knownKinds(this.save).map((kind) => ({
+        kind,
         category: CATEGORY_LABEL[CATALOG[kind].category],
         name: CATALOG[kind].name,
         blurb: CATALOG[kind].blurb,
@@ -278,6 +289,7 @@ export class Game {
     return {
       sandbox: session.sandbox,
       kicker: session.sandbox ? 'Workshop' : `${world?.kicker ?? 'Puzzle'} · ${world?.name ?? ''}`.trim(),
+      code: session.sandbox ? '' : this.levelCode(session),
       title: session.level.name,
       summary: session.level.summary,
       guide: session.guide(this.clearedGap(session)),
@@ -296,11 +308,20 @@ export class Game {
         swift: Boolean(record?.swift),
       },
       now: session.medals,
+      targets: session.level.medals,
+      stats: {
+        time: `${(session.sim?.t ?? 0).toFixed(2)}s`,
+        pieces: session.pieces.length,
+        launches: session.attempts,
+      },
+      visit: this.visit,
       chips: session.level.palette.map((allowance, index) => {
         const left = remaining(session.pieces, session.level.palette, index);
         const finishing = allowance.kind === 'portal' && session.pendingLink !== null;
         return {
           index,
+          kind: allowance.kind,
+          left: finishing ? 1 : left,
           label: allowance.label ?? CATALOG[allowance.kind].name,
           meta: allowance.kind === 'portal' ? (finishing ? 'Place the exit' : `${Math.max(0, left)} pair${left === 1 ? '' : 's'}`) : `${Math.max(0, left)} left`,
           selected: session.tool === index,
@@ -332,6 +353,15 @@ export class Game {
       issues: this.notice,
       drafts: this.save.drafts.map((draft) => ({ id: draft.id, name: draft.name })),
     };
+  }
+
+  private levelCode(session: Session): string {
+    const level = session.level;
+    if (level.secret) return 'Secret';
+    const worldIndex = WORLDS.findIndex((world) => world.id === level.worldId);
+    const index = levelsInWorld(level.worldId).findIndex((entry) => entry.id === level.id);
+    if (worldIndex < 0 || index < 0) return '';
+    return `${worldIndex + 1}-${index + 1}`;
   }
 
   private viewKey(play: PlayView | null, dailyDone: boolean, dailyName: string, medals: number): string {
@@ -372,6 +402,7 @@ export class Game {
       play.saved.reach,
       play.saved.lean,
       play.saved.swift,
+      play.visit,
     ].join('~');
   }
 
@@ -494,6 +525,7 @@ export class Game {
     const level = levelById(id);
     if (!level || !isLevelOpen(level, this.save)) return;
     const record = this.save.levels[id];
+    this.visit += 1;
     this.session = new Session(level, { attempts: record?.attempts ?? 0, hints: record?.hints ?? 0 });
     this.session.reducedMotion = this.save.settings.reducedMotion;
     this.screen = 'play';
