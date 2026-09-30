@@ -32,7 +32,16 @@ export interface DrawWorld {
   accent: string;
   devText: string;
   fx: RenderFx;
+  /** The player's ball finish. Omitted means the workshop default. */
+  ball?: BallPaint;
 }
+
+export interface BallPaint {
+  band: string;
+  body: [string, string, string];
+}
+
+const DEFAULT_BALL: BallPaint = { band: '#EA580C', body: ['#6D7C8E', '#243140', '#0B1016'] };
 
 const TAU = Math.PI * 2;
 
@@ -321,6 +330,7 @@ function drawTrail(ctx: CanvasRenderingContext2D, input: DrawWorld, path: { x: n
 }
 
 function drawBalls(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
+  const paint = input.ball ?? DEFAULT_BALL;
   if (input.mode === 'run' && input.sim) {
     const many = input.sim.balls.length > 1;
     for (const ball of input.sim.balls) {
@@ -334,7 +344,7 @@ function drawBalls(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
         sx = fx.nx;
         sy = fx.ny;
       }
-      drawBall(ctx, ball.x, ball.y, ball.r, ball.vx, ball.vy, input.reducedMotion, fx?.spin ?? 0, squash, sx, sy, many ? ball.id.toUpperCase() : undefined);
+      drawBall(ctx, ball.x, ball.y, ball.r, ball.vx, ball.vy, input.reducedMotion, fx?.spin ?? 0, squash, sx, sy, paint, many ? ball.id.toUpperCase() : undefined);
     }
     return;
   }
@@ -357,7 +367,7 @@ function drawBalls(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
       ctx.lineWidth = px(input.camera, 1.5);
       ctx.stroke();
     }
-    drawBall(ctx, start.x, start.y, r, 0, 0, true, 0, 0, 0, 0, many ? start.id.toUpperCase() : undefined);
+    drawBall(ctx, start.x, start.y, r, 0, 0, true, 0, 0, 0, 0, paint, many ? start.id.toUpperCase() : undefined);
   }
 }
 
@@ -373,6 +383,7 @@ function drawBall(
   squash: number,
   nx: number,
   ny: number,
+  paint: BallPaint,
   letter?: string,
 ): void {
   ctx.save();
@@ -400,9 +411,9 @@ function drawBall(
     ctx.rotate(-angle);
   }
   const body = ctx.createRadialGradient(-r * 0.32, r * 0.34, r * 0.08, 0.02, -0.02, r);
-  body.addColorStop(0, '#6D7C8E');
-  body.addColorStop(0.42, '#243140');
-  body.addColorStop(1, '#0B1016');
+  body.addColorStop(0, paint.body[0]);
+  body.addColorStop(0.42, paint.body[1]);
+  body.addColorStop(1, paint.body[2]);
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, TAU);
   ctx.fillStyle = body;
@@ -414,7 +425,7 @@ function drawBall(
   ctx.arc(0, 0, r * 0.98, 0, TAU);
   ctx.clip();
   ctx.rotate(spin);
-  ctx.fillStyle = 'rgba(234, 88, 12, 0.92)';
+  ctx.fillStyle = hexAlpha(paint.band, 0.92);
   ctx.fillRect(-r, -r * 0.17, r * 2, r * 0.34);
   ctx.fillStyle = 'rgba(255, 237, 213, 0.9)';
   ctx.beginPath();

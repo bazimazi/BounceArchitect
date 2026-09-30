@@ -104,6 +104,8 @@ export class Session {
   toast = '';
   hintIndex = 0;
   attempts = 0;
+  /** Missed launches since this level was opened. Drives the gentle offers of help. */
+  losses = 0;
   medals: Medals = { reach: false, lean: false, swift: false };
   pendingLink: string | null = null;
   hover: Piece | null = null;
@@ -833,6 +835,7 @@ export class Session {
       return;
     }
     this.toast = this.sim.reason || 'The ball never arrived.';
+    this.losses += 1;
     this.queue('fail');
     if (!this.reducedMotion) {
       this.shake = Math.max(this.shake, 0.45);

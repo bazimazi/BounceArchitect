@@ -8,6 +8,8 @@ export interface Settings {
   reducedMotion: boolean;
   highContrast: boolean;
   uiScale: number;
+  /** The ball finish the player picked. Finishes open with medals. */
+  finish: string;
 }
 
 export interface LevelRecord extends Medals {
@@ -15,6 +17,12 @@ export interface LevelRecord extends Medals {
   bestPieces: number;
   attempts: number;
   hints: number;
+  /** Skipped ahead. Counts toward opening the campaign, never toward medals. */
+  passed?: boolean;
+  /** Reached on the very first launch. */
+  firstTry?: boolean;
+  /** Reached without opening a hint. */
+  unaided?: boolean;
 }
 
 export interface Draft {
@@ -32,7 +40,9 @@ export interface SaveData {
   settings: Settings;
   drafts: Draft[];
   dailies: Record<string, { levelId: string; done: boolean }>;
-  stats: { launches: number; solves: number; hints: number };
+  stats: { launches: number; solves: number; hints: number; exports: number };
+  /** Feats earned, by id, with the time each landed. Feats are never taken back. */
+  feats: Record<string, number>;
 }
 
 export interface Store {
@@ -52,6 +62,7 @@ export function defaultSettings(): Settings {
     reducedMotion: reduced,
     highContrast: false,
     uiScale: 1,
+    finish: 'workshop',
   };
 }
 
@@ -63,7 +74,8 @@ export function freshSave(): SaveData {
     settings: defaultSettings(),
     drafts: [],
     dailies: {},
-    stats: { launches: 0, solves: 0, hints: 0 },
+    stats: { launches: 0, solves: 0, hints: 0, exports: 0 },
+    feats: {},
   };
 }
 
@@ -76,6 +88,7 @@ export function blankRecord(): LevelRecord {
     bestPieces: Infinity,
     attempts: 0,
     hints: 0,
+    passed: false,
   };
 }
 
@@ -95,6 +108,12 @@ export function loadSave(store?: Store): SaveData {
     if (!raw) return freshSave();
     const parsed = JSON.parse(raw) as Partial<SaveData>;
     if (parsed.format !== 1 || !parsed.levels || !parsed.settings) return freshSave();
+    // JSON has no Infinity, so an unset best comes back as null, and older saves let
+    // Math.min read that null as zero. No solve takes zero seconds or zero pieces.
+    for (const record of Object.values(parsed.levels)) {
+      if (!(typeof record.bestTime === 'number' && record.bestTime > 0)) record.bestTime = Infinity;
+      if (!(typeof record.bestPieces === 'number' && record.bestPieces > 0)) record.bestPieces = Infinity;
+    }
     return {
       ...freshSave(),
       ...parsed,
@@ -104,6 +123,7 @@ export function loadSave(store?: Store): SaveData {
       drafts: parsed.drafts ?? [],
       dailies: parsed.dailies ?? {},
       seenWorlds: parsed.seenWorlds ?? [],
+      feats: parsed.feats ?? {},
     };
   } catch {
     return freshSave();

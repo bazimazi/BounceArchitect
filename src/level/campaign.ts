@@ -1,4 +1,4 @@
-import type { Level, WorldDef } from '../core/types';
+import type { Level, ObjectKind, WorldDef } from '../core/types';
 import { deg, makeLevel, piece, seat } from './factory';
 
 export const WORLDS: WorldDef[] = [
@@ -613,36 +613,6 @@ function levels(): Level[] {
       ],
     }),
     makeLevel({
-      id: 'w6-latch',
-      name: 'The Latch',
-      worldId: 'machines',
-      summary: 'The door opens for a ball that has already passed the switch.',
-      intent: 'Route over a switch, then a spring throws the ball through the opened door.',
-      trajectory: 'off',
-      previewSeconds: 0,
-      view,
-      environment: [
-        latchPad,
-        piece('sw', 'switch', 5.4, 5.55, 1.15, 1),
-        piece('pit', 'platform', 9.2, 1.15, 2.4, 0.28),
-        piece('spring', 'spring', 9.2, 1.85, 1.1, 0.48, deg(90), { power: 15 }),
-        piece('door', 'door', 9.2, 4.15, 0.3, 1.7, 0, { gate: 'sw' }),
-        piece('shelf', 'oneway', 9.2, 5.85, 2, 0.18),
-        piece('guide2', 'wall', 10.7, 3.5, 0.24, 4.2),
-      ],
-      starts: [{ id: 'a', ...latchBall }],
-      goals: [{ id: 'g', x: 9.2, y: 6.45, r: 0.55 }],
-      palette: [{ kind: 'ramp', count: 2, w: 3.4, h: 0.22, label: 'Ramp' }],
-      medals: { pieces: 2, seconds: 9 },
-      hints: [
-        'The door stays shut until the switch feels the ball.',
-        'The spring in the pit fires upward. The door is in that path.',
-        'Cross the switch on the way into the pit. Order matters.',
-        'You may need one ramp to the switch and another down into the pit.',
-        'Ramp from the pad across the switch, then down into the pit. The spring does the rest.',
-      ],
-    }),
-    makeLevel({
       id: 'w6-both',
       name: 'Both Rings',
       worldId: 'machines',
@@ -677,6 +647,36 @@ function levels(): Level[] {
         'Point both arrows up, and put each spring under its ball.',
         'The chevron shelves catch a ball coming from below.',
         'A spring on each floor, arrow up, directly under each ball.',
+      ],
+    }),
+    makeLevel({
+      id: 'w6-latch',
+      name: 'The Latch',
+      worldId: 'machines',
+      summary: 'The door opens for a ball that has already passed the switch.',
+      intent: 'Route over a switch, then a spring throws the ball through the opened door.',
+      trajectory: 'off',
+      previewSeconds: 0,
+      view,
+      environment: [
+        latchPad,
+        piece('sw', 'switch', 5.4, 5.55, 1.15, 1),
+        piece('pit', 'platform', 9.2, 1.15, 2.4, 0.28),
+        piece('spring', 'spring', 9.2, 1.85, 1.1, 0.48, deg(90), { power: 15 }),
+        piece('door', 'door', 9.2, 4.15, 0.3, 1.7, 0, { gate: 'sw' }),
+        piece('shelf', 'oneway', 9.2, 5.85, 2, 0.18),
+        piece('guide2', 'wall', 10.7, 3.5, 0.24, 4.2),
+      ],
+      starts: [{ id: 'a', ...latchBall }],
+      goals: [{ id: 'g', x: 9.2, y: 6.45, r: 0.55 }],
+      palette: [{ kind: 'ramp', count: 2, w: 3.4, h: 0.22, label: 'Ramp' }],
+      medals: { pieces: 2, seconds: 9 },
+      hints: [
+        'The door stays shut until the switch feels the ball.',
+        'The spring in the pit fires upward. The door is in that path.',
+        'Cross the switch on the way into the pit. Order matters.',
+        'You may need one ramp to the switch and another down into the pit.',
+        'Ramp from the pad across the switch, then down into the pit. The spring does the rest.',
       ],
     }),
     makeLevel({
@@ -751,4 +751,23 @@ export function worldOf(worldId: string): WorldDef | undefined {
 
 export function levelsInWorld(worldId: string): Level[] {
   return LEVELS.filter((level) => level.worldId === worldId);
+}
+
+const SCENERY: ReadonlySet<ObjectKind> = new Set(['platform', 'wall']);
+
+/** Mechanics a world is the first to show, in the order its levels bring them in. */
+export function newKinds(worldId: string): ObjectKind[] {
+  const seen = new Set<ObjectKind>(SCENERY);
+  for (const world of WORLDS) {
+    const fresh: ObjectKind[] = [];
+    for (const level of levelsInWorld(world.id)) {
+      for (const kind of [...level.palette.map((allowance) => allowance.kind), ...level.environment.map((built) => built.kind)]) {
+        if (seen.has(kind)) continue;
+        seen.add(kind);
+        fresh.push(kind);
+      }
+    }
+    if (world.id === worldId) return fresh;
+  }
+  return [];
 }

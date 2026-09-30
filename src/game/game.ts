@@ -1,14 +1,29 @@
 import { AudioBus } from '../audio/audio';
 import { deg, piece } from '../level/factory';
-import { LEVELS, levelById, levelsInWorld, worldOf, WORLDS } from '../level/campaign';
+import { LEVELS, levelById, levelsInWorld, linearLevels, newKinds, worldOf, WORLDS } from '../level/campaign';
 import { CATALOG, CATEGORY_LABEL } from '../level/catalog';
-import { dailyCard, dailyLevel, dayKey } from '../level/daily';
+import { dailiesDone, dailyCard, dailyFor, dayKey, longestStreak } from '../level/daily';
 import { cleanTitle, isClean } from '../level/moderate';
 import { parseLevel, validateBuild } from '../level/validate';
 import { knownKinds, workshopLevel } from '../level/workshop';
-import { medalCount, medalNote, mergeMedals, rankTitle } from '../progress/medals';
+import { medalCount, medalNote, mergeMedals, nextRank, rankTitle } from '../progress/medals';
+import { activeFinish, FINISHES, finishById, finishesOpened, finishOpen, type Finish, type Unlocks } from '../progress/finishes';
+import { awardFeats, FEATS, featProgress, perfectWorlds, type Feat } from '../progress/feats';
+import { chaseList } from '../progress/chase';
+import type { Level } from '../core/types';
 import { ensureRecord, freshSave, loadSave, writeSave, type SaveData } from '../progress/save';
-import { firstUnsolved, isLevelOpen, nextLinearId, secretFrom, totalMedals } from '../progress/unlock';
+import {
+  campaignDone,
+  clearedInWorld,
+  clearsToAdvance,
+  firstUnsolved,
+  isLevelOpen,
+  isWorldOpen,
+  lockReason,
+  nextLevelId,
+  openLevelIds,
+  totalMedals,
+} from '../progress/unlock';
 import { remaining } from '../editor/budget';
 import { sameAllowance } from '../editor/budget';
 import { createState, FIXED_DT, step, toSim, type SimState } from '../physics/sim';
@@ -44,6 +59,11 @@ export class Game {
   private winToken = '';
   private lastSpoken = '';
   private visit = 0;
+  /** What the last win opened: worlds, levels, finishes, a new rank. Shown on the result card. */
+  private rewards: string[] = [];
+  /** A line that floats over any screen for a few seconds, such as a feat landing. */
+  private flash = '';
+  private flashUntil = 0;
   private pointers = new Map<number, { x: number; y: number }>();
   private pinchDist = 0;
   private panning = false;
@@ -58,6 +78,8 @@ export class Game {
 
   constructor(root: HTMLElement) {
     this.save = loadSave();
+    // Saves from before feats existed get what they have already done, quietly.
+    if (awardFeats(this.save).length > 0) this.persist();
     root.innerHTML = '<canvas id="board" aria-label="Construction board"></canvas><div id="chrome"></div><div id="live" class="sr" aria-live="polite"></div>';
     const canvas = root.querySelector('#board');
     const chrome = root.querySelector('#chrome');
@@ -85,6 +107,7 @@ export class Game {
     const dt = Math.min(0.05, this.last ? (now - this.last) / 1000 : 1 / 60);
     this.last = now;
     if (dt > 0) this.fps += (1 / dt - this.fps) * 0.08;
+    if (this.flash && now > this.flashUntil) this.flash = '';
     this.syncCanvas();
     if (this.screen === 'title') this.tickAttract(dt);
     const session = this.session;
@@ -171,6 +194,7 @@ export class Game {
         accent: '#C2410C',
         devText: '',
         fx: this.attractFx,
+        ball: this.ballFinish(),
       });
       return;
     }
@@ -207,6 +231,7 @@ export class Game {
           ? `${this.fps.toFixed(0)} fps  ${session.mode}  ${session.sim?.phase ?? 'build'}  ${ball ? `${ball.vx.toFixed(1)}, ${ball.vy.toFixed(1)}` : ''}`
           : '',
         fx: session.fx,
+        ball: this.ballFinish(),
       });
       return;
     }
@@ -217,22 +242,49 @@ export class Game {
 
   private view(): ViewModel {
     const medals = totalMedals(this.save);
+    const medalMax = LEVELS.length * 3;
     const daily = dailyCard(this.save);
     const current = firstUnsolved(this.save);
     const play = this.playView();
     const key = this.viewKey(play, daily.done, daily.name, medals);
+    const upcoming = nextRank(medals, medalMax);
+    const unlocks = this.unlocks();
+    const finish = activeFinish(this.save.settings.finish, unlocks);
+    const featsEarned = FEATS.filter((feat) => this.save.feats[feat.id] !== undefined).length;
     return {
       key,
       screen: this.screen,
       clock: play?.mode === 'run' ? `${(this.session?.clock ?? 0).toFixed(1)}s` : '',
       hasProgress: this.hasProgress(),
-      rank: rankTitle(medals),
+      rank: rankTitle(medals, medalMax),
+      nextRank: upcoming
+        ? `${upcoming.need} more medal${upcoming.need === 1 ? '' : 's'} to ${upcoming.title}`
+        : 'Top rank. Every line is clean.',
       medalTotal: medals,
-      medalMax: LEVELS.length * 3,
+      medalMax,
+      finishes: FINISHES.map((entry) => {
+        const open = finishOpen(entry, unlocks);
+        return {
+          id: entry.id,
+          name: entry.name,
+          label: open ? entry.name : `${entry.name}, ${this.finishLock(entry)}`,
+          tag: entry.feat ? '★' : `${entry.need}`,
+          band: entry.band,
+          body: entry.body[1],
+          open,
+          selected: finish.id === entry.id,
+        };
+      }),
       worlds: WORLDS.map((world, worldIndex) => {
         const all = levelsInWorld(world.id);
         const levels = all.filter((level) => !level.secret || isLevelOpen(level, this.save));
-        const open = levels.some((level) => isLevelOpen(level, this.save));
+        // The meter tracks the campaign levels. A secret's medals count toward rank, not here.
+        const counted = all.filter((level) => !level.secret);
+        const earned = counted.reduce((sum, level) => sum + medalCount(this.save.levels[level.id]), 0);
+        const total = counted.length * 3;
+        const open = isWorldOpen(world.id, this.save);
+        const previous = WORLDS[worldIndex - 1];
+        const left = previous ? clearsToAdvance(previous.id) - clearedInWorld(previous.id, this.save) : 0;
         return {
           id: world.id,
           number: worldIndex + 1,
@@ -241,25 +293,41 @@ export class Game {
           lesson: world.lesson,
           accent: world.accent,
           open,
-          earned: all.reduce((sum, level) => sum + medalCount(this.save.levels[level.id]), 0),
-          total: all.filter((level) => !level.secret).length * 3,
+          lock: previous && !open ? `Clear ${Math.max(1, left)} more in ${previous.name} to open it.` : '',
+          introduces: newKinds(world.id).map((kind) => CATALOG[kind].name),
+          earned,
+          total,
+          perfect: total > 0 && earned === total,
           levels: open
-            ? levels.map((level, levelIndex) => ({
-                id: level.id,
-                number: levelIndex + 1,
-                name: level.name,
-                summary: level.summary,
-                open: isLevelOpen(level, this.save),
-                secret: Boolean(level.secret),
-                reach: Boolean(this.save.levels[level.id]?.reach),
-                lean: Boolean(this.save.levels[level.id]?.lean),
-                swift: Boolean(this.save.levels[level.id]?.swift),
-                current: level.id === current,
-              }))
+            ? levels.map((level, levelIndex) => {
+                const record = this.save.levels[level.id];
+                const unlocked = isLevelOpen(level, this.save);
+                return {
+                  id: level.id,
+                  number: levelIndex + 1,
+                  name: level.name,
+                  summary: level.summary,
+                  open: unlocked,
+                  lock: unlocked ? '' : lockReason(level, this.save),
+                  secret: Boolean(level.secret),
+                  passed: Boolean(record?.passed && !record.reach),
+                  reach: Boolean(record?.reach),
+                  lean: Boolean(record?.lean),
+                  swift: Boolean(record?.swift),
+                  current: level.id === current,
+                };
+              })
             : [],
         };
       }),
-      daily: { name: daily.name, blurb: daily.blurb, open: daily.open, done: daily.done },
+      daily: { name: daily.name, blurb: daily.blurb, open: daily.open, done: daily.done, streak: daily.streak, best: daily.best },
+      chase: chaseList(this.save).flatMap((entry) => {
+        const level = levelById(entry.levelId);
+        return level ? [{ id: level.id, code: codeFor(level), name: level.name, medal: entry.medal, note: entry.note }] : [];
+      }),
+      feats: { earned: featsEarned, total: FEATS.length },
+      log: this.screen === 'log' ? this.logView(medals, medalMax) : { stats: [], feats: [], earned: featsEarned },
+      flash: this.flash,
       play,
       notes: knownKinds(this.save).map((kind) => ({
         kind,
@@ -268,13 +336,55 @@ export class Game {
         blurb: CATALOG[kind].blurb,
       })),
       confirm: this.confirm,
-      settings: {
-        ...this.save.settings,
-        launches: this.save.stats.launches,
-        solves: this.save.stats.solves,
-        hints: this.save.stats.hints,
-      },
+      settings: { ...this.save.settings },
     };
+  }
+
+  private logView(medals: number, medalMax: number): ViewModel['log'] {
+    const records = LEVELS.map((level) => this.save.levels[level.id]);
+    const count = (test: (record: NonNullable<(typeof records)[number]>) => boolean) =>
+      records.filter((record) => record && test(record)).length;
+    const streak = longestStreak(this.save);
+    const feats = FEATS.map((feat) => this.featCard(feat));
+    return {
+      stats: [
+        { label: 'medals', value: `${medals}/${medalMax}` },
+        { label: 'solved', value: `${count((record) => record.reach)}` },
+        { label: 'flawless', value: `${count((record) => medalCount(record) === 3)}` },
+        { label: 'first-launch clears', value: `${count((record) => Boolean(record.reach && record.firstTry))}` },
+        { label: 'worlds perfected', value: `${perfectWorlds(this.save)}/${WORLDS.length}` },
+        { label: 'launches', value: `${this.save.stats.launches}` },
+        { label: 'hints', value: `${this.save.stats.hints}` },
+        { label: 'daily blueprints', value: `${dailiesDone(this.save)}` },
+        { label: 'best streak', value: `${streak} day${streak === 1 ? '' : 's'}` },
+      ],
+      feats,
+      earned: feats.filter((feat) => feat.done).length,
+    };
+  }
+
+  private featCard(feat: Feat): ViewModel['log']['feats'][number] {
+    const progress = featProgress(feat, this.save);
+    const secret = feat.hidden && !progress.done;
+    const reward = FINISHES.find((finish) => finish.feat === feat.id);
+    const when = this.save.feats[feat.id];
+    return {
+      id: feat.id,
+      name: secret ? 'Unmarked' : feat.name,
+      blurb: secret ? 'Somewhere off the plans.' : feat.blurb,
+      have: progress.have,
+      need: progress.need,
+      done: progress.done,
+      when: when === undefined ? '' : new Date(when).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }),
+      reward: reward && !secret ? reward.name : '',
+    };
+  }
+
+  private finishLock(finish: Finish): string {
+    if (!finish.feat) return `opens at ${finish.need} medals`;
+    const feat = FEATS.find((entry) => entry.id === finish.feat);
+    if (!feat || feat.hidden) return 'opens with a hidden feat';
+    return `opens with the ${feat.name} feat`;
   }
 
   private playView(): PlayView | null {
@@ -284,12 +394,11 @@ export class Game {
     const record = this.save.levels[session.level.id];
     const selected = session.pieces.find((piece) => piece.uid === session.selected[0]);
     const tool = session.tool === null ? undefined : session.level.palette[session.tool];
-    const nextId = session.sandbox ? undefined : nextLinearId(session.level.id);
-    const secret = session.outcome === 'won' && !session.sandbox ? secretFrom(session.level.id, this.save) : undefined;
+    const nextId = session.sandbox ? undefined : nextLevelId(session.level.id, this.save);
     return {
       sandbox: session.sandbox,
       kicker: session.sandbox ? 'Workshop' : `${world?.kicker ?? 'Puzzle'} · ${world?.name ?? ''}`.trim(),
-      code: session.sandbox ? '' : this.levelCode(session),
+      code: session.sandbox ? '' : codeFor(session.level),
       title: session.level.name,
       summary: session.level.summary,
       guide: session.guide(this.clearedGap(session)),
@@ -341,12 +450,21 @@ export class Game {
       showSkip:
         !session.sandbox &&
         session.outcome !== 'won' &&
-        session.attempts >= 4 &&
-        session.hintIndex >= 4 &&
-        !record?.reach,
+        (session.losses >= 3 || session.attempts >= 8) &&
+        !record?.reach &&
+        !record?.passed,
+      nudgeHint:
+        !session.sandbox &&
+        session.outcome !== 'won' &&
+        session.losses >= 2 &&
+        session.hintIndex < Math.min(session.level.hints.length, session.losses - 1),
       confirm: this.confirm,
       nextName: nextId ? (levelById(nextId)?.name ?? null) : null,
-      secretNote: secret ? `${secret.name} is open on the map.` : '',
+      rewards: session.outcome === 'won' ? this.rewards : [],
+      best:
+        !session.sandbox && record?.reach && Number.isFinite(record.bestTime) && Number.isFinite(record.bestPieces)
+          ? `Your best: ${record.bestTime.toFixed(2)}s · ${record.bestPieces} piece${record.bestPieces === 1 ? '' : 's'}`
+          : '',
       follow: session.follow,
       showGhost: session.showGhost,
       hasGhost: session.ghost.length > 0,
@@ -355,18 +473,17 @@ export class Game {
     };
   }
 
-  private levelCode(session: Session): string {
-    const level = session.level;
-    if (level.secret) return 'Secret';
-    const worldIndex = WORLDS.findIndex((world) => world.id === level.worldId);
-    const index = levelsInWorld(level.worldId).findIndex((entry) => entry.id === level.id);
-    if (worldIndex < 0 || index < 0) return '';
-    return `${worldIndex + 1}-${index + 1}`;
+  private viewKey(play: PlayView | null, dailyDone: boolean, dailyName: string, medals: number): string {
+    return `${this.screenKey(play, dailyDone, dailyName, medals)}#${this.flash}`;
   }
 
-  private viewKey(play: PlayView | null, dailyDone: boolean, dailyName: string, medals: number): string {
-    if (this.screen === 'title') return `title|${this.hasProgress()}`;
-    if (this.screen === 'map') return `map|${medals}|${dailyDone}|${dailyName}|${firstUnsolved(this.save)}`;
+  private screenKey(play: PlayView | null, dailyDone: boolean, dailyName: string, medals: number): string {
+    const feats = Object.keys(this.save.feats).length;
+    if (this.screen === 'title') return `title|${this.hasProgress()}|${medals}`;
+    if (this.screen === 'map') {
+      return `map|${medals}|${feats}|${dailyDone}|${dailyName}|${firstUnsolved(this.save)}|${this.save.settings.finish}|${this.progressKey()}`;
+    }
+    if (this.screen === 'log') return `log|${medals}|${feats}|${this.save.stats.launches}`;
     if (this.screen === 'notes') return `notes|${knownKinds(this.save).join(',')}`;
     if (this.screen === 'settings') return `settings|${this.confirm}|${this.save.settings.uiScale}`;
     if (!play || !this.session) return this.screen;
@@ -403,6 +520,9 @@ export class Game {
       play.saved.lean,
       play.saved.swift,
       play.visit,
+      play.nudgeHint,
+      play.rewards.join('/'),
+      play.best,
     ].join('~');
   }
 
@@ -426,13 +546,34 @@ export class Game {
       this.screen = 'settings';
       return;
     }
+    if (act === 'log') {
+      this.screen = 'log';
+      return;
+    }
     if (act === 'begin' || act === 'continue') {
-      this.openLevel(this.hasProgress() ? firstUnsolved(this.save) : 'w1-gap');
+      const next = this.hasProgress() ? firstUnsolved(this.save) : 'w1-gap';
+      if (next) this.openLevel(next);
+      else this.screen = 'map';
       return;
     }
     if (act === 'daily') {
-      const card = dailyCard(this.save);
-      if (card.open) this.openLevel(dailyLevel().id);
+      const today = dayKey();
+      const { level } = dailyFor(this.save);
+      // Pin today's pick, so opening more of the campaign does not swap it out mid-day.
+      if (!this.save.dailies[today]) {
+        this.save.dailies[today] = { levelId: level.id, done: false };
+        this.persist();
+      }
+      this.openLevel(level.id);
+      return;
+    }
+    if (act.startsWith('finish:')) {
+      const id = act.slice(7);
+      const finish = finishById(id);
+      if (finish.id === id && finishOpen(finish, this.unlocks())) {
+        this.save.settings.finish = id;
+        this.persist();
+      }
       return;
     }
     if (act === 'workshop') {
@@ -503,7 +644,7 @@ export class Game {
     else if (act.startsWith('tool:')) session.selectTool(Number(act.slice(5)));
     else if (act.startsWith('speed:')) session.setSpeed(Number(act.slice(6)));
     else if (act === 'next') {
-      const next = nextLinearId(session.level.id);
+      const next = nextLevelId(session.level.id, this.save);
       if (next) this.openLevel(next);
       else this.screen = 'map';
     } else if (act === 'skip') this.confirm = 'skip';
@@ -535,6 +676,7 @@ export class Game {
     this.seenHints = this.session.hintIndex;
     this.winToken = '';
     this.lesson = '';
+    this.rewards = [];
     const world = worldOf(level.worldId);
     if (world && !this.save.seenWorlds.includes(world.id)) {
       this.save.seenWorlds.push(world.id);
@@ -560,10 +702,10 @@ export class Game {
 
   private skipLevel(session: Session): void {
     const record = ensureRecord(this.save, session.level.id);
-    record.reach = true;
+    record.passed = true;
     this.confirm = '';
     this.persist();
-    const next = nextLinearId(session.level.id);
+    const next = nextLevelId(session.level.id, this.save);
     if (next) this.openLevel(next);
     else this.screen = 'map';
   }
@@ -591,20 +733,44 @@ export class Game {
       if (token !== this.winToken) {
         this.winToken = token;
         const wasReach = record.reach;
+        const before = this.snapshot();
+        const time = session.sim.t;
+        const pieces = session.pieces.length;
+        const bests: string[] = [];
+        if (wasReach && Number.isFinite(record.bestTime) && time < record.bestTime - 0.005) {
+          bests.push(`New best time: ${time.toFixed(2)}s, down from ${record.bestTime.toFixed(2)}s.`);
+        }
+        if (wasReach && Number.isFinite(record.bestPieces) && pieces < record.bestPieces) {
+          bests.push(`New best build: ${pieces} piece${pieces === 1 ? '' : 's'}, down from ${record.bestPieces}.`);
+        }
         const merged = mergeMedals(record, session.medals);
         record.reach = merged.reach;
         record.lean = merged.lean;
         record.swift = merged.swift;
-        record.bestTime = Math.min(record.bestTime, session.sim.t);
-        record.bestPieces = Math.min(record.bestPieces, session.pieces.length);
+        record.bestTime = Math.min(record.bestTime, time);
+        record.bestPieces = Math.min(record.bestPieces, pieces);
+        // Session counts carry over from earlier visits, so these read the whole history.
+        if (session.attempts === 1) record.firstTry = true;
+        if (session.hintIndex === 0) record.unaided = true;
         if (!wasReach) this.save.stats.solves += 1;
-        if (dailyLevel().id === session.level.id) {
+        if (dailyFor(this.save).level.id === session.level.id) {
           this.save.dailies[dayKey()] = { levelId: session.level.id, done: true };
         }
+        awardFeats(this.save);
+        this.rewards = [...this.rewardsSince(before), ...bests];
         changed = true;
       }
+    } else if (changed) {
+      // A feat can land without a win, such as the hundredth launch.
+      this.announce(awardFeats(this.save));
     }
     if (changed && !this.persist()) session.toast = session.toast || 'This device could not store that progress.';
+  }
+
+  private announce(feats: Feat[]): void {
+    if (feats.length === 0) return;
+    this.flash = feats.map((feat) => `Feat earned: ${feat.name}`).join(' · ');
+    this.flashUntil = this.last + 4200;
   }
 
   private saveDraft(session: Session): void {
@@ -659,6 +825,9 @@ export class Game {
     link.click();
     URL.revokeObjectURL(url);
     this.notice = 'Exported. Another player can import it in the workshop.';
+    this.save.stats.exports += 1;
+    this.announce(awardFeats(this.save));
+    this.persist();
   }
 
   private importFile(file: File): void {
@@ -958,13 +1127,74 @@ export class Game {
     return writeSave(this.save);
   }
 
+  private snapshot(): { open: Set<string>; worlds: Set<string>; medals: number; done: boolean; unlocks: Unlocks } {
+    return {
+      open: openLevelIds(this.save),
+      worlds: new Set(WORLDS.filter((world) => isWorldOpen(world.id, this.save)).map((world) => world.id)),
+      medals: totalMedals(this.save),
+      done: campaignDone(this.save),
+      unlocks: { medals: totalMedals(this.save), feats: { ...this.save.feats } },
+    };
+  }
+
+  private unlocks(): Unlocks {
+    return { medals: totalMedals(this.save), feats: this.save.feats };
+  }
+
+  /** Plain lines for everything a win just opened, biggest news first. */
+  private rewardsSince(before: ReturnType<Game['snapshot']>): string[] {
+    const after = this.snapshot();
+    const max = LEVELS.length * 3;
+    const lines: string[] = [];
+    if (after.done && !before.done) lines.push(`Every world cleared. ${after.medals} of ${max} medals so far.`);
+    for (const world of WORLDS) {
+      if (after.worlds.has(world.id) && !before.worlds.has(world.id)) lines.push(`${world.kicker} is open: ${world.name}.`);
+    }
+    for (const level of LEVELS) {
+      if (!after.open.has(level.id) || before.open.has(level.id)) continue;
+      if (level.secret) lines.push(`Secret: ${level.name} is open on the map.`);
+      else if (before.worlds.has(level.worldId)) lines.push(`${level.name} is open.`);
+    }
+    const rank = rankTitle(after.medals, max);
+    if (rank !== rankTitle(before.medals, max)) lines.push(`New rank: ${rank}.`);
+    for (const feat of FEATS) {
+      if (after.unlocks.feats[feat.id] !== undefined && before.unlocks.feats[feat.id] === undefined) {
+        lines.push(`Feat: ${feat.name}. ${feat.blurb}`);
+      }
+    }
+    for (const finish of finishesOpened(before.unlocks, after.unlocks)) {
+      lines.push(`New ball finish: ${finish.name}. Pick it on the map.`);
+    }
+    return lines;
+  }
+
+  private ballFinish() {
+    return activeFinish(this.save.settings.finish, this.unlocks());
+  }
+
+  /** Changes whenever a clear or pass lands, so the map redraws its locks. */
+  private progressKey(): string {
+    return linearLevels()
+      .map((level) => (this.save.levels[level.id]?.reach ? 'r' : this.save.levels[level.id]?.passed ? 'p' : '-'))
+      .join('');
+  }
+
   private hasProgress(): boolean {
-    return Object.values(this.save.levels).some((record) => record.attempts > 0 || record.reach);
+    return Object.values(this.save.levels).some((record) => record.attempts > 0 || record.reach || record.passed);
   }
 
   private clearedGap(session: Session): boolean {
     return Boolean(this.save.levels['w1-gap']?.reach || session.medals.reach);
   }
+}
+
+/** The short code a level goes by, like 3-2. */
+function codeFor(level: Level): string {
+  if (level.secret) return 'Secret';
+  const worldIndex = WORLDS.findIndex((world) => world.id === level.worldId);
+  const index = levelsInWorld(level.worldId).findIndex((entry) => entry.id === level.id);
+  if (worldIndex < 0 || index < 0) return '';
+  return `${worldIndex + 1}-${index + 1}`;
 }
 
 function buzz(ms: number, enabled: boolean): void {

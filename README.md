@@ -17,7 +17,13 @@ Progress, drafts, and settings stay in this browser. Nothing is sent anywhere.
 
 ## What’s here
 
-Seven worlds, from the first ramp through springs, momentum, gravity, portals, machines, and breakable floors. Medals are Reach, Lean, and Swift. Hints are optional. A secret level opens when The Narrow Ring earns all three.
+Seven worlds, from the first ramp through springs, momentum, gravity, portals, machines, and breakable floors. Each world opens with the level that teaches its mechanic. After that, one spare level stays open beyond the next, and the next world opens once all but one level here is cleared, so no single puzzle is a wall. Stuck players are offered hints, then a pass that moves them on without a medal.
+
+Medals are Reach, Lean, and Swift. They raise your rank and open new ball finishes. A secret level opens when The Narrow Ring earns all three. The map keeps a short "within reach" list of the medals your best builds came closest to, and marks a world perfected once every medal in it is earned. Each puzzle shows your best time and piece count, and the result card calls out a new best.
+
+Feats reward how you play rather than how far you get: clearing on the first launch, clearing without hints, coming back to a puzzle you passed on, keeping a daily streak, exporting a workshop level. Some of them open ball finishes of their own. The logbook shows every feat with its progress, along with your rank and record.
+
+The daily blueprint comes from the whole campaign, with a stand-in from opened levels when today's is still ahead. Finishing it on consecutive days builds a streak, and the map remembers your longest one.
 
 The workshop uses the same simulation as the campaign. It unlocks pieces as the campaign opens them, saves drafts on this device, and can export a level file.
 

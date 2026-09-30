@@ -20,7 +20,11 @@ export interface LevelNode {
   name: string;
   summary: string;
   open: boolean;
+  /** Why a locked level is locked, in a few words. */
+  lock: string;
   secret: boolean;
+  /** Skipped ahead without a Reach. */
+  passed: boolean;
   reach: boolean;
   lean: boolean;
   swift: boolean;
@@ -35,9 +39,55 @@ export interface WorldCard {
   lesson: string;
   accent: string;
   open: boolean;
+  /** What opens a locked world. */
+  lock: string;
+  /** Mechanics this world is the first to bring in. */
+  introduces: string[];
   earned: number;
   total: number;
+  /** Every medal on offer here is earned. */
+  perfect: boolean;
   levels: LevelNode[];
+}
+
+export interface FinishChip {
+  id: string;
+  name: string;
+  /** Its name, or what a shut finish still wants, as a spoken label. */
+  label: string;
+  /** Short mark on a shut swatch: a medal count, or a star for a feat. */
+  tag: string;
+  band: string;
+  body: string;
+  open: boolean;
+  selected: boolean;
+}
+
+export interface ChaseRow {
+  id: string;
+  code: string;
+  name: string;
+  medal: 'lean' | 'swift';
+  note: string;
+}
+
+export interface FeatCard {
+  id: string;
+  name: string;
+  blurb: string;
+  have: number;
+  need: number;
+  done: boolean;
+  /** Date the feat landed, when it has. */
+  when: string;
+  /** The ball finish it opens, if any. */
+  reward: string;
+}
+
+export interface LogView {
+  stats: { label: string; value: string }[];
+  feats: FeatCard[];
+  earned: number;
 }
 
 export interface NoteCard {
@@ -81,9 +131,14 @@ export interface PlayView {
   canLink: boolean;
   snapLabel: string;
   showSkip: boolean;
+  /** Several misses and no hint yet. The hint button leans forward. */
+  nudgeHint: boolean;
   confirm: '' | 'skip' | 'clear' | 'reset';
   nextName: string | null;
-  secretNote: string;
+  /** Everything the win just opened. */
+  rewards: string[];
+  /** This player's best clear so far, in a few words. Empty until reached. */
+  best: string;
   follow: boolean;
   showGhost: boolean;
   hasGhost: boolean;
@@ -95,14 +150,22 @@ export interface PlayView {
 
 export interface ViewModel {
   key: string;
-  screen: 'title' | 'map' | 'play' | 'workshop' | 'notes' | 'settings';
+  screen: 'title' | 'map' | 'play' | 'workshop' | 'notes' | 'settings' | 'log';
   clock: string;
   hasProgress: boolean;
   rank: string;
+  nextRank: string;
   medalTotal: number;
   medalMax: number;
+  finishes: FinishChip[];
   worlds: WorldCard[];
-  daily: { name: string; blurb: string; open: boolean; done: boolean };
+  daily: { name: string; blurb: string; open: boolean; done: boolean; streak: number; best: number };
+  /** Medals the best builds so far came close to. */
+  chase: ChaseRow[];
+  feats: { earned: number; total: number };
+  log: LogView;
+  /** A short line that floats over any screen, such as a feat landing. */
+  flash: string;
   play: PlayView | null;
   notes: NoteCard[];
   confirm: '' | 'skip' | 'clear' | 'reset';
@@ -113,9 +176,6 @@ export interface ViewModel {
     reducedMotion: boolean;
     highContrast: boolean;
     uiScale: number;
-    launches: number;
-    solves: number;
-    hints: number;
   };
 }
 
@@ -166,11 +226,21 @@ export class Shell {
 }
 
 function render(vm: ViewModel): string {
+  return renderScreen(vm) + flash(vm.flash);
+}
+
+function renderScreen(vm: ViewModel): string {
   if (vm.screen === 'title') return renderTitle(vm);
   if (vm.screen === 'map') return renderMap(vm);
   if (vm.screen === 'notes') return renderNotes(vm);
   if (vm.screen === 'settings') return renderSettings(vm);
+  if (vm.screen === 'log') return renderLog(vm);
   return renderPlay(vm);
+}
+
+function flash(text: string): string {
+  if (!text) return '';
+  return `<p class="flash" role="status" data-enter="flash:${esc(text)}">${icon('star')}<span>${esc(text)}</span></p>`;
 }
 
 function renderTitle(vm: ViewModel): string {
@@ -192,6 +262,7 @@ function renderTitle(vm: ViewModel): string {
       <div class="row quiet stagger" style="--i:6">
         <button class="text" type="button" data-act="workshop">Workshop</button>
         <button class="text" type="button" data-act="notes">Field notes</button>
+        ${vm.hasProgress ? '<button class="text" type="button" data-act="log">Logbook</button>' : ''}
         <button class="text" type="button" data-act="settings">Settings</button>
       </div>
     </section>
@@ -212,13 +283,16 @@ function renderMap(vm: ViewModel): string {
         <span class="rank-badge" aria-hidden="true">${medalGlyph('reach', true)}</span>
         <div class="rank-text">
           <strong>${esc(vm.rank)}</strong>
-          <span>${vm.medalTotal} of ${vm.medalMax} medals</span>
+          <span>${vm.medalTotal} of ${vm.medalMax} medals · ${esc(vm.nextRank)}</span>
+          <span>${vm.feats.earned} of ${vm.feats.total} feats</span>
         </div>
         <div class="meter" role="img" aria-label="${share}% of medals"><span style="--fill:${share}%"></span></div>
+        ${finishRow(vm.finishes)}
       </div>
       <div class="row">
         <button class="primary" type="button" data-act="continue">${icon('play')}<span>Continue</span></button>
         <button class="ghost" type="button" data-act="workshop">${icon('wrench')}<span>Workshop</span></button>
+        <button class="ghost" type="button" data-act="log">${icon('trophy')}<span>Logbook</span></button>
         <button class="ghost" type="button" data-act="notes">${icon('book')}<span>Field notes</span></button>
       </div>
     </header>
@@ -229,9 +303,11 @@ function renderMap(vm: ViewModel): string {
         <h2>${esc(vm.daily.name)}</h2>
         <p>${esc(vm.daily.blurb)}</p>
         ${vm.daily.done ? `<p class="done">${icon('check')} Done today.</p>` : ''}
+        ${streakLine(vm.daily.streak, vm.daily.best)}
       </div>
-      ${vm.daily.open ? '<button class="primary" type="button" data-act="daily">Play today’s blueprint</button>' : ''}
+      ${vm.daily.open ? `<button class="${vm.daily.done ? 'ghost' : 'primary'}" type="button" data-act="daily">${vm.daily.done ? 'Play it again' : 'Play today’s blueprint'}</button>` : ''}
     </section>
+    ${chaseCard(vm.chase)}
     ${vm.worlds.map(renderWorld).join('')}
   </main>`;
 }
@@ -246,11 +322,12 @@ function renderWorld(world: WorldCard, index: number): string {
           <h2>${esc(world.name)}</h2>
         </div>
       </header>
-      <p class="muted">Still ahead. Clear the world before it to open this one.</p>
+      <p class="muted">${esc(world.lock || 'Still ahead.')}</p>
+      ${introduces(world)}
     </section>`;
   }
   const share = world.total > 0 ? Math.round((world.earned / world.total) * 100) : 0;
-  return `<section class="world" style="--world:${esc(world.accent)}; --i:${index}" data-enter="world:${esc(world.id)}">
+  return `<section class="world${world.perfect ? ' perfect' : ''}" style="--world:${esc(world.accent)}; --i:${index}" data-enter="world:${esc(world.id)}">
     <header class="world-head">
       <span class="world-no" aria-hidden="true">${world.number}</span>
       <div>
@@ -258,11 +335,13 @@ function renderWorld(world: WorldCard, index: number): string {
         <h2>${esc(world.name)}</h2>
       </div>
       <div class="world-meter" title="${world.earned} of ${world.total} medals">
+        ${world.perfect ? `<span class="perfect-tag">${icon('star')}Perfected</span>` : ''}
         <span class="count">${world.earned}<small>/${world.total}</small></span>
         <div class="meter"><span style="--fill:${share}%"></span></div>
       </div>
     </header>
     <p class="lesson-line">${esc(world.lesson)}</p>
+    ${introduces(world)}
     <ol class="tiles">
       ${world.levels.map((level, i) => renderTile(world, level, i)).join('')}
     </ol>
@@ -272,16 +351,17 @@ function renderWorld(world: WorldCard, index: number): string {
 function renderTile(world: WorldCard, level: LevelNode, index: number): string {
   const code = level.secret ? '★' : `${world.number}-${level.number}`;
   if (!level.open) {
-    return `<li style="--i:${index}"><button class="tile locked" type="button" disabled aria-label="${esc(level.name)}, locked">
+    return `<li style="--i:${index}"><button class="tile locked" type="button" disabled aria-label="${esc(level.name)}, locked. ${esc(level.lock)}">
       <span class="tile-no">${icon('lock')}</span>
       <strong>${esc(level.name)}</strong>
-      <small>Locked</small>
+      <small>${esc(level.lock || 'Locked')}</small>
     </button></li>`;
   }
   const count = Number(level.reach) + Number(level.lean) + Number(level.swift);
-  const state = level.current ? ' current' : count === 3 ? ' perfect' : level.reach ? ' cleared' : '';
+  const state = level.current ? ' current' : count === 3 ? ' perfect' : level.reach ? ' cleared' : level.passed ? ' passed' : '';
+  const tag = level.current ? (level.passed ? 'Retry' : 'Next') : level.passed ? 'Passed' : '';
   return `<li style="--i:${index}"><button class="tile${state}${level.secret ? ' secret' : ''}" type="button" data-act="level:${esc(level.id)}" title="${esc(level.summary)}">
-    ${level.current ? '<span class="tile-tag">Next</span>' : ''}
+    ${tag ? `<span class="tile-tag${level.passed && !level.current ? ' quiet' : ''}">${tag}</span>` : ''}
     <span class="tile-no">${esc(code)}</span>
     <strong>${esc(level.name)}</strong>
     <span class="pips" aria-label="${count} of 3 medals">
@@ -355,12 +435,8 @@ function renderSettings(vm: ViewModel): string {
       </div>
     </section>
     <section class="card settings-card">
-      <h2>Record</h2>
-      <div class="stat-row">
-        <div class="stat"><strong>${settings.solves}</strong><span>solved</span></div>
-        <div class="stat"><strong>${settings.launches}</strong><span>launches</span></div>
-        <div class="stat"><strong>${settings.hints}</strong><span>hints</span></div>
-      </div>
+      <h2>Progress</h2>
+      <p class="muted">Your record and feats are in the <button class="text" type="button" data-act="log">logbook</button>.</p>
       ${
         vm.confirm === 'reset'
           ? '<button class="ghost danger" type="button" data-act="reset-yes">Erase progress on this device</button>'
@@ -372,6 +448,86 @@ function renderSettings(vm: ViewModel): string {
       <p>Space launches. Q and E rotate. Arrows nudge a selected piece, or pan the board. Ctrl+Z undoes. G cycles the grid. P pauses. H frames the level. 1–9 pick a piece.</p>
     </details>
   </main>`;
+}
+
+function renderLog(vm: ViewModel): string {
+  const log = vm.log;
+  const share = vm.medalMax > 0 ? Math.round((vm.medalTotal / vm.medalMax) * 100) : 0;
+  return `<main class="screen sheet">
+    <header class="sheet-head">
+      <button class="text" type="button" data-act="map">${icon('back')} Back</button>
+      <p class="kicker">Logbook</p>
+      <h1>Your record</h1>
+      <p class="lede">Medals mark how cleanly you build. Feats mark how you play.</p>
+    </header>
+    <section class="rank-card card" data-enter="log-rank">
+      <span class="rank-badge" aria-hidden="true">${medalGlyph('reach', true)}</span>
+      <div class="rank-text">
+        <strong>${esc(vm.rank)}</strong>
+        <span>${vm.medalTotal} of ${vm.medalMax} medals · ${esc(vm.nextRank)}</span>
+      </div>
+      <div class="meter" role="img" aria-label="${share}% of medals"><span style="--fill:${share}%"></span></div>
+    </section>
+    <section class="card settings-card">
+      <h2>Record</h2>
+      <div class="stat-row wide">
+        ${log.stats.map((stat) => `<div class="stat"><strong>${esc(stat.value)}</strong><span>${esc(stat.label)}</span></div>`).join('')}
+      </div>
+    </section>
+    <section class="feat-group">
+      <div class="row spread"><h2>Feats</h2><span class="muted">${log.earned} of ${log.feats.length}</span></div>
+      <ol class="feat-grid">
+        ${log.feats.map(featCard).join('')}
+      </ol>
+    </section>
+  </main>`;
+}
+
+function featCard(feat: FeatCard, index: number): string {
+  const share = feat.need > 0 ? Math.round((feat.have / feat.need) * 100) : 0;
+  const status = feat.done ? `Earned ${feat.when}` : `${feat.have} of ${feat.need}`;
+  return `<li class="card feat${feat.done ? ' earned' : ''}" style="--i:${index}" data-enter="feat:${esc(feat.id)}:${feat.done}">
+    <span class="feat-mark" aria-hidden="true">${icon(feat.done ? 'star' : 'lock')}</span>
+    <div class="feat-text">
+      <h3>${esc(feat.name)}</h3>
+      <p>${esc(feat.blurb)}</p>
+      ${feat.reward ? `<p class="feat-reward">Opens the ${esc(feat.reward)} ball finish.</p>` : ''}
+      ${feat.need > 1 && !feat.done ? `<div class="meter" role="img" aria-label="${esc(status)}"><span style="--fill:${share}%"></span></div>` : ''}
+      <small>${esc(status)}</small>
+    </div>
+  </li>`;
+}
+
+function streakLine(streak: number, best: number): string {
+  if (streak > 1) {
+    const record = best > streak ? ` · best ${best}` : ' · your best';
+    return `<p class="streak">${icon('spark')} ${streak}-day streak${record}</p>`;
+  }
+  if (best > 1) return `<p class="streak quiet">${icon('spark')} Best streak: ${best} days</p>`;
+  return '';
+}
+
+function chaseCard(rows: ChaseRow[]): string {
+  if (rows.length === 0) return '';
+  return `<section class="card chase" data-enter="chase">
+    <div>
+      <p class="kicker">Within reach</p>
+      <p class="muted">Your best builds came close on these.</p>
+    </div>
+    <ul>
+      ${rows
+        .map(
+          (row, i) => `<li style="--i:${i}"><button class="chase-row" type="button" data-act="level:${esc(row.id)}">
+            ${medalGlyph(row.medal, false)}
+            <span class="chase-code">${esc(row.code)}</span>
+            <strong>${esc(row.name)}</strong>
+            <small>${esc(row.note)}</small>
+            ${icon('arrow')}
+          </button></li>`,
+        )
+        .join('')}
+    </ul>
+  </section>`;
 }
 
 function renderPlay(vm: ViewModel): string {
@@ -435,6 +591,7 @@ function goalsPanel(play: PlayView): string {
     ${goalMedal('reach', 'Reach', 'Land in the ring', play.saved.reach, play.now.reach)}
     ${goalMedal('lean', 'Lean', `${pieces} piece${pieces === 1 ? '' : 's'} or fewer`, play.saved.lean, play.now.lean)}
     ${goalMedal('swift', 'Swift', `${seconds}s or faster`, play.saved.swift, play.now.swift)}
+    ${play.best ? `<p class="best">${esc(play.best)}</p>` : ''}
   </div>`;
 }
 
@@ -463,10 +620,15 @@ function workshopActions(play: PlayView): string {
     ${play.issues ? `<p class="issues">${esc(play.issues)}</p>` : ''}`;
 }
 
-function tool(act: string, iconName: string, label: string, options: { disabled?: boolean; pressed?: boolean; keys?: string; danger?: boolean } = {}): string {
+function tool(
+  act: string,
+  iconName: string,
+  label: string,
+  options: { disabled?: boolean; pressed?: boolean; keys?: string; danger?: boolean; nudge?: boolean } = {},
+): string {
   const pressed = options.pressed === undefined ? '' : ` aria-pressed="${options.pressed}"`;
   const keys = options.keys ? ` aria-keyshortcuts="${options.keys}"` : '';
-  return `<button class="tb${options.danger ? ' danger' : ''}" type="button" data-act="${act}" title="${esc(label)}"${pressed}${keys}${options.disabled ? ' disabled' : ''}>${icon(iconName)}<span>${esc(label)}</span></button>`;
+  return `<button class="tb${options.danger ? ' danger' : ''}${options.nudge ? ' nudge' : ''}" type="button" data-act="${act}" title="${esc(label)}"${pressed}${keys}${options.disabled ? ' disabled' : ''}>${icon(iconName)}<span>${esc(label)}</span></button>`;
 }
 
 function tools(play: PlayView): string {
@@ -511,7 +673,7 @@ function tools(play: PlayView): string {
     ${extra}
     <div class="group">
       ${tool('snap', 'grid', `Grid ${play.snapLabel}`, { keys: 'G' })}
-      ${tool('hint', 'bulb', play.hintStep)}
+      ${tool('hint', 'bulb', play.hintStep, { nudge: play.nudgeHint })}
       ${tool('frame', 'frame', 'Frame', { keys: 'H' })}
       ${play.hasGhost ? tool('ghost', 'ghost', 'Last run', { pressed: play.showGhost }) : ''}
       ${
@@ -532,15 +694,18 @@ function banner(play: PlayView): string {
     );
   }
   if (play.hint) bits.push(`<p class="hint"><span class="hint-tag">${icon('bulb')}${esc(play.hintStep)}</span> ${esc(play.hint)}</p>`);
+  if (play.nudgeHint && (play.mode === 'build' || play.outcome === 'lost')) {
+    bits.push(`<button class="ghost small offer" type="button" data-act="hint">${icon('bulb')}<span>${play.hint ? 'Another hint' : 'Want a hint?'}</span></button>`);
+  }
   if (play.showSkip) {
     bits.push(
       play.confirm === 'skip'
-        ? '<button class="ghost" type="button" data-act="skip-yes">Skip ahead. You can come back for the medals.</button>'
-        : '<button class="text" type="button" data-act="skip">Skip this puzzle</button>',
+        ? '<button class="ghost" type="button" data-act="skip-yes">Pass for now. It stays open, and the next puzzle opens.</button>'
+        : '<button class="text" type="button" data-act="skip">Pass on this one for now</button>',
     );
   }
   if (bits.length === 0) return '';
-  const token = `banner:${play.outcome ?? 'none'}:${play.attempts}:${play.toast}:${play.hintStep}`;
+  const token = `banner:${play.outcome ?? 'none'}:${play.attempts}:${play.toast}:${play.hintStep}:${play.nudgeHint}`;
   return `<section class="banner card${play.outcome === 'lost' ? ' lost' : ''}" role="status" data-enter="${esc(token)}">${bits.join('')}</section>`;
 }
 
@@ -572,7 +737,11 @@ function result(play: PlayView): string {
         <div class="stat"><strong>${play.stats.launches}</strong><span>launch${play.stats.launches === 1 ? '' : 'es'}</span></div>
       </div>
       <p class="note">${esc(play.medalNote)}</p>
-      ${play.secretNote ? `<p class="secret-note">${icon('star')} ${esc(play.secretNote)}</p>` : ''}
+      ${
+        play.rewards.length
+          ? `<ul class="rewards">${play.rewards.map((line, i) => `<li style="--i:${i}">${icon('star')}<span>${esc(line)}</span></li>`).join('')}</ul>`
+          : ''
+      }
       <div class="row">
         ${
           play.nextName
@@ -583,6 +752,24 @@ function result(play: PlayView): string {
         <button class="ghost" type="button" data-act="edit">${icon('wrench')}<span>Keep tinkering</span></button>
       </div>
     </section>
+  </div>`;
+}
+
+function introduces(world: WorldCard): string {
+  if (world.introduces.length === 0) return '';
+  return `<p class="brings"><span class="kicker">Brings</span>${world.introduces.map((name) => `<span class="brings-chip">${esc(name)}</span>`).join('')}</p>`;
+}
+
+function finishRow(finishes: FinishChip[]): string {
+  return `<div class="finishes" role="group" aria-label="Ball finish">
+    <span class="kicker">Ball</span>
+    ${finishes
+      .map((finish) => {
+        return `<button class="finish${finish.selected ? ' on' : ''}" type="button" style="--band:${esc(finish.band)}; --body:${esc(finish.body)}" data-act="finish:${esc(finish.id)}" aria-pressed="${finish.selected}" aria-label="${esc(finish.label)}" title="${esc(finish.label)}"${finish.open ? '' : ' disabled'}>
+          <span class="swatch" aria-hidden="true"></span>${finish.open ? '' : `<small>${esc(finish.tag)}</small>`}
+        </button>`;
+      })
+      .join('')}
   </div>`;
 }
 
@@ -645,6 +832,7 @@ function icon(name: string): string {
     book: '<path d="M5 5 A2 2 0 0 1 7 3 H19 V17 H7 A2 2 0 0 0 5 19 Z"/><path d="M5 19 A2 2 0 0 0 7 21 H19 V17"/>',
     calendar: '<rect x="4" y="5.5" width="16" height="14" rx="2"/><path d="M4 10 H20"/><path d="M8.5 3.5 V7"/><path d="M15.5 3.5 V7"/><path d="M8 14 H10"/><path d="M14 14 H16"/>',
     lock: '<rect x="5.5" y="10.5" width="13" height="9.5" rx="2"/><path d="M8.5 10.5 V8 A3.5 3.5 0 0 1 15.5 8 V10.5"/>',
+    trophy: '<path d="M8 4 H16 V10 A4 4 0 0 1 8 10 Z"/><path d="M8 6 H5 A3 3 0 0 0 8 11"/><path d="M16 6 H19 A3 3 0 0 1 16 11"/><path d="M12 14 V17"/><path d="M8.5 20 H15.5 L14.5 17 H9.5 Z"/>',
     star: '<path d="M12 4 L14.3 9 L19.6 9.5 L15.6 13 L16.8 18.3 L12 15.5 L7.2 18.3 L8.4 13 L4.4 9.5 L9.7 9 Z"/>',
   };
   return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[name] ?? ''}</svg>`;

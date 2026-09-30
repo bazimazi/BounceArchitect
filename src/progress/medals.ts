@@ -34,13 +34,32 @@ export function medalCount(medals: Medals | undefined): number {
   return Number(medals.reach) + Number(medals.lean) + Number(medals.swift);
 }
 
-export function rankTitle(medals: number): string {
-  if (medals >= 40) return 'Master Architect';
-  if (medals >= 28) return 'Architect';
-  if (medals >= 16) return 'Engineer';
-  if (medals >= 8) return 'Builder';
-  if (medals >= 3) return 'Draftsman';
-  return 'Apprentice';
+/** Ranks are shares of every medal in the game, so new levels never make them easier. */
+const RANKS: [number, string][] = [
+  [0, 'Apprentice'],
+  [0.05, 'Draftsman'],
+  [0.15, 'Builder'],
+  [0.35, 'Engineer'],
+  [0.6, 'Architect'],
+  [0.9, 'Master Architect'],
+];
+
+function rankNeed(share: number, max: number): number {
+  return share === 0 ? 0 : Math.max(1, Math.ceil(share * max));
+}
+
+export function rankTitle(medals: number, max: number): string {
+  let title = RANKS[0]![1];
+  for (const [share, name] of RANKS) if (medals >= rankNeed(share, max)) title = name;
+  return title;
+}
+
+export function nextRank(medals: number, max: number): { title: string; need: number } | null {
+  for (const [share, name] of RANKS) {
+    const need = rankNeed(share, max);
+    if (medals < need) return { title: name, need: need - medals };
+  }
+  return null;
 }
 
 export function medalNote(
