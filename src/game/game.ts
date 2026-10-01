@@ -75,6 +75,7 @@ export class Game {
   private attractHold = 0;
   private attractCamera: Camera = fitCamera(this.attractLevel.view, 1280, 720);
   private attractFx = emptyFx();
+  private attractTrails: { x: number; y: number }[][] = [];
 
   constructor(root: HTMLElement) {
     this.save = loadSave();
@@ -151,6 +152,8 @@ export class Game {
         this.attractSim = createState(toSim(this.attractLevel, this.attractPieces));
         this.attractHold = 0;
         this.attractAcc = 0;
+        this.attractTrails = [];
+        this.attractFx = emptyFx();
       }
       return;
     }
@@ -159,6 +162,17 @@ export class Game {
     while (this.attractAcc >= FIXED_DT) {
       step(level, this.attractSim);
       this.attractAcc -= FIXED_DT;
+      this.attractSim.balls.forEach((ball, index) => {
+        const trail = this.attractTrails[index] ?? (this.attractTrails[index] = []);
+        const last = trail[trail.length - 1];
+        if (!last || Math.hypot(ball.x - last.x, ball.y - last.y) > 0.04) {
+          trail.push({ x: ball.x, y: ball.y });
+          if (trail.length > 240) trail.shift();
+        }
+        const fx = this.attractFx.balls.get(ball.id) ?? { spin: 0, amp: 0, age: 1, nx: 0, ny: 1 };
+        fx.spin -= ball.vx * FIXED_DT / ball.r;
+        this.attractFx.balls.set(ball.id, fx);
+      });
       if (this.attractSim.phase !== 'running') break;
     }
   }
@@ -182,7 +196,7 @@ export class Game {
         guides: [],
         preview: [],
         ghost: [],
-        trail: [],
+        trail: this.attractTrails,
         sim: this.attractSim,
         mode: this.save.settings.reducedMotion ? 'build' : 'run',
         time,
@@ -191,7 +205,7 @@ export class Game {
         showColliders: false,
         particles: [],
         shake: 0,
-        accent: '#C2410C',
+        accent: '#EEC17D',
         devText: '',
         fx: this.attractFx,
         ball: this.ballFinish(),
@@ -236,7 +250,7 @@ export class Game {
       return;
     }
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    ctx.fillStyle = '#F4F1EA';
+    ctx.fillStyle = '#091E25';
     ctx.fillRect(0, 0, this.cssW, this.cssH);
   }
 
@@ -1102,6 +1116,13 @@ export class Game {
     if (force || size !== this.lastSize) {
       this.lastSize = size;
       this.attractCamera = fitCamera(this.attractLevel.view, this.cssW, this.cssH);
+      if (this.cssW > 620) {
+        const previewWidth = this.cssW * 0.51;
+        this.attractCamera = fitCamera(this.attractLevel.view, previewWidth, this.cssH * 0.66);
+        // Position the real experiment in the right half of the cover.
+        this.attractCamera.x -= this.cssW * 0.225 / this.attractCamera.zoom;
+        this.attractCamera.y += this.cssH * 0.015 / this.attractCamera.zoom;
+      }
       this.session?.resize(this.cssW, this.cssH, this.chromeInset());
     }
   }

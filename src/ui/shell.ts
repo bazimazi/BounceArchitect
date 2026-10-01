@@ -245,18 +245,19 @@ function flash(text: string): string {
 
 function renderTitle(vm: ViewModel): string {
   return `<div class="title-wrap">
+    <header class="studio-masthead"><span class="studio-brand">${icon('grid')} BOUNCE ARCHITECT <i>/</i> THE PHYSICS STUDIO</span><button class="text" type="button" data-act="settings">${icon('gear')} Settings</button></header>
     <section class="title-card" data-enter="title">
-      ${emblem()}
-      <p class="kicker title-kicker stagger" style="--i:1">Physics puzzle</p>
+      <p class="kicker title-kicker stagger" style="--i:1"><span class="status-dot"></span> A playground for curious minds</p>
       <h1 class="wordmark stagger" style="--i:2"><span>Bounce</span> <span>Architect</span></h1>
-      <p class="lede stagger" style="--i:3">You don’t control the ball. You engineer the world around it.</p>
+      <p class="lede stagger" style="--i:3">A little physics.<br>A lot of possibility.</p>
+      <p class="title-description stagger" style="--i:4">Shape a path. Set things in motion. Turn one small bounce into something brilliant.</p>
       ${
         vm.hasProgress
           ? `<p class="title-stat stagger" style="--i:4">${medalGlyph('reach', true)} <span>${esc(vm.rank)} · ${vm.medalTotal} of ${vm.medalMax} medals</span></p>`
           : ''
       }
       <div class="row stagger" style="--i:5">
-        <button class="primary big" type="button" data-act="begin">${icon('play')}<span>${vm.hasProgress ? 'Continue' : 'Begin'}</span></button>
+        <button class="primary big" type="button" data-act="begin"><span>${vm.hasProgress ? 'Continue building' : 'Enter the studio'}</span>${icon('arrow')}</button>
         <button class="ghost big" type="button" data-act="map">${icon('map')}<span>Campaign</span></button>
       </div>
       <div class="row quiet stagger" style="--i:6">
@@ -266,6 +267,8 @@ function renderTitle(vm: ViewModel): string {
         <button class="text" type="button" data-act="settings">Settings</button>
       </div>
     </section>
+    <div class="demo-caption" aria-hidden="true"><span class="status-dot"></span> LIVE EXPERIMENT <span>01 / THE FIRST BOUNCE</span></div>
+    <footer class="studio-footer"><span>BUILD. BOUNCE. BRILLIANT.</span><div><span><b>07</b> worlds to discover</span><span><b>16</b> ways to build</span><span><b>∞</b> possibilities</span></div><span class="studio-footer-note">Failure is part of the design.</span></footer>
   </div>`;
 }
 
@@ -278,7 +281,8 @@ function renderMap(vm: ViewModel): string {
         <button class="icon" type="button" data-act="settings" aria-label="Settings" title="Settings">${icon('gear')}</button>
       </div>
       <p class="kicker">Campaign</p>
-      <h1>The board</h1>
+      <h1>A world of possibilities.</h1>
+      <p class="lede">Seven chapters. One wonderfully curious ball.</p>
       <div class="rank-card card" data-enter="rank">
         <span class="rank-badge" aria-hidden="true">${medalGlyph('reach', true)}</span>
         <div class="rank-text">
@@ -315,6 +319,7 @@ function renderMap(vm: ViewModel): string {
 function renderWorld(world: WorldCard, index: number): string {
   if (!world.open) {
     return `<section class="world locked" style="--world:${esc(world.accent)}; --i:${index}" data-enter="world:${esc(world.id)}">
+      ${worldIllustration(world.number)}
       <header class="world-head">
         <span class="world-no" aria-hidden="true">${icon('lock')}</span>
         <div>
@@ -328,6 +333,7 @@ function renderWorld(world: WorldCard, index: number): string {
   }
   const share = world.total > 0 ? Math.round((world.earned / world.total) * 100) : 0;
   return `<section class="world${world.perfect ? ' perfect' : ''}" style="--world:${esc(world.accent)}; --i:${index}" data-enter="world:${esc(world.id)}">
+    ${worldIllustration(world.number)}
     <header class="world-head">
       <span class="world-no" aria-hidden="true">${world.number}</span>
       <div>
@@ -784,10 +790,19 @@ function intro(play: PlayView): string {
   </div>`;
 }
 
-/** The title emblem: a ball rolls off a ramp, arcs along its dotted path, and drops into the ring. */
-function emblem(): string {
+/** Small mechanism studies give each campaign chapter a distinct visual identity. */
+function worldIllustration(number: number): string {
+  const mechanisms: Record<number, string> = {
+    2: '<path d="M45 83 h16 l6 -22 10 38 10 -38 10 38 10 -38 6 22 h16"/><path d="M142 78 Q156 5 197 38" stroke-dasharray="3 6"/>',
+    3: '<path d="M25 80 H185 M42 87 H165"/><path d="m65 65 10 -8 -10 -8 m30 16 10 -8 -10 -8 m30 16 10 -8 -10 -8"/>',
+    4: '<ellipse cx="110" cy="56" rx="65" ry="24" transform="rotate(-25 110 56)"/><ellipse cx="110" cy="56" rx="65" ry="24" transform="rotate(40 110 56)"/><circle cx="110" cy="56" r="13"/>',
+    5: '<ellipse cx="53" cy="56" rx="20" ry="37"/><ellipse cx="166" cy="56" rx="20" ry="37"/><path d="M53 56 C93 6 119 102 166 56" stroke-dasharray="3 5"/>',
+    6: '<path d="M36 82 V48 H95 V82 H168 V35"/><circle cx="95" cy="48" r="18"/><path d="M95 19 V30 M95 66 V77 M66 48 H77 M113 48 H124"/>',
+    7: '<path d="M28 72 H96 L104 80 110 62 117 74 H192 M30 80 H87 M127 82 H191"/><path d="m99 91 6 8 5 -7 m12 6 5 7 3 -10"/>',
+  };
+  if (number > 1) return `<div class="world-art" aria-hidden="true"><svg viewBox="0 0 220 110"><g class="world-mechanism">${mechanisms[number] ?? ''}</g><circle class="world-orb" cx="53" cy="30" r="7"/></svg><span>EXPERIMENT / 0${number}</span></div>`;
   const flight = 'M18 27 L60 35.5 C92 42 118 22 146 42 C162 54 174 62 184 62';
-  return `<div class="emblem" aria-hidden="true">
+  return `<div class="world-art" aria-hidden="true"><div class="emblem">
     <svg viewBox="0 0 220 110">
       <path class="em-grid" d="M0 20 H220 M0 50 H220 M0 80 H220 M40 0 V110 M90 0 V110 M140 0 V110 M190 0 V110"/>
       <path class="em-path" d="${flight}"/>
@@ -799,7 +814,7 @@ function emblem(): string {
       <path class="em-gem" d="M184 56 L188.5 62 L184 68 L179.5 62 Z"/>
     </svg>
     <span class="em-ball" style="offset-path: path('${flight}')"></span>
-  </div>`;
+  </div><span>EXPERIMENT / 01</span></div>`;
 }
 
 function medalGlyph(kind: 'reach' | 'lean' | 'swift', on: boolean): string {

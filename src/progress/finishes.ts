@@ -21,7 +21,7 @@ export interface Unlocks {
 }
 
 export const FINISHES: Finish[] = [
-  { id: 'workshop', name: 'Workshop', need: 0, band: '#EA580C', body: ['#6D7C8E', '#243140', '#0B1016'] },
+  { id: 'workshop', name: 'Workshop', need: 0, band: '#F2C681', body: ['#B5CEC8', '#47626A', '#132E38'] },
   { id: 'brass', name: 'Brass', need: 6, band: '#F59E0B', body: ['#8A7A5C', '#3B3222', '#15110A'] },
   { id: 'tide', name: 'Tidewater', need: 15, band: '#14B8A6', body: ['#5E8A8C', '#1C3A40', '#081518'] },
   { id: 'dusk', name: 'Dusk', need: 27, band: '#A78BFA', body: ['#7A6E96', '#2B2244', '#0E0A18'] },

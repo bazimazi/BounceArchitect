@@ -1,4 +1,5 @@
 import './style.css';
+import './studio.css';
 import { Game } from './game/game';
 
 const root = document.querySelector('#app');

@@ -4,6 +4,7 @@ import { piecePose } from '../physics/sim';
 import type { SimState } from '../physics/sim';
 import { BALL_R } from '../physics/sim';
 import { worldToScreen, type Camera } from './camera';
+import { paintBackdrop, drawTable } from './studio';
 
 export interface DrawWorld {
   width: number;
@@ -67,7 +68,7 @@ const RUBBER: Material = { hi: '#4B5767', mid: '#2D3743', lo: '#19222D', edge: '
 const BRASS: Material = { hi: '#FFE7BD', mid: '#F4AE5E', lo: '#C45C12', edge: '#7C2D12' };
 const GLASS: Material = { hi: 'rgba(240, 253, 255, 0.95)', mid: 'rgba(186, 230, 236, 0.85)', lo: 'rgba(126, 190, 200, 0.9)', edge: '#1F6F78' };
 
-const DEFAULT_BALL: BallPaint = { band: '#EA580C', body: ['#6D7C8E', '#243140', '#0B1016'] };
+const DEFAULT_BALL: BallPaint = { band: '#F2C681', body: ['#B5CEC8', '#47626A', '#132E38'] };
 
 const TAU = Math.PI * 2;
 /** Where the desk lamp sits: shadows fall down and to the right of every piece. */
@@ -126,6 +127,7 @@ export function drawWorld(ctx: CanvasRenderingContext2D, input: DrawWorld): void
   drawGuides(ctx, input);
   drawBalls(ctx, input, paint);
   drawParticles(ctx, input);
+  drawResonance(ctx, input);
 
   if (input.showColliders) {
     ctx.strokeStyle = 'rgba(190,24,93,0.8)';
@@ -156,7 +158,7 @@ export function drawWorld(ctx: CanvasRenderingContext2D, input: DrawWorld): void
     ctx.save();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.font = '13px Outfit, sans-serif';
-    ctx.fillStyle = '#1B2430';
+    ctx.fillStyle = input.highContrast ? '#1B2430' : '#E4EEDF';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillText(input.devText, 16, 78);
@@ -167,141 +169,6 @@ export function drawWorld(ctx: CanvasRenderingContext2D, input: DrawWorld): void
 /* ------------------------------------------------------------------ */
 /* The room: paper, lamp light, drifting dust                          */
 /* ------------------------------------------------------------------ */
-
-let backCache: { key: string; canvas: HTMLCanvasElement } | null = null;
-
-function paintBackdrop(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
-  const { width, height, dpr } = input;
-  if (input.highContrast) {
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, width, height);
-    return;
-  }
-  const key = `${width}|${height}|${dpr}`;
-  if (!backCache || backCache.key !== key) {
-    const canvas = buildBackdrop(width, height, dpr);
-    if (canvas) backCache = { key, canvas };
-  }
-  if (backCache) ctx.drawImage(backCache.canvas, 0, 0, width, height);
-
-  const drift = input.reducedMotion ? 0 : input.time;
-  const lampX = width * (0.42 + Math.sin(drift * 0.17) * 0.03);
-  const lampY = height * (0.32 + Math.cos(drift * 0.13) * 0.02);
-  const lamp = ctx.createRadialGradient(lampX, lampY, 20, lampX, lampY, Math.max(width, height) * 0.62);
-  lamp.addColorStop(0, 'rgba(255, 222, 170, 0.6)');
-  lamp.addColorStop(0.35, 'rgba(255, 176, 96, 0.16)');
-  lamp.addColorStop(1, 'rgba(255, 160, 80, 0)');
-  ctx.fillStyle = lamp;
-  ctx.fillRect(0, 0, width, height);
-
-  // Soft shafts of lamp light falling across the desk.
-  ctx.save();
-  ctx.globalCompositeOperation = 'screen';
-  for (let i = 0; i < 3; i += 1) {
-    const sway = Math.sin(drift * 0.11 + i * 1.7) * width * 0.03;
-    const x0 = width * (0.05 + i * 0.2) + sway;
-    const beam = ctx.createLinearGradient(x0, 0, x0 + width * 0.45, height);
-    beam.addColorStop(0, 'rgba(255, 236, 200, 0.14)');
-    beam.addColorStop(1, 'rgba(255, 236, 200, 0)');
-    ctx.fillStyle = beam;
-    ctx.beginPath();
-    ctx.moveTo(x0, -10);
-    ctx.lineTo(x0 + width * (0.07 + i * 0.02), -10);
-    ctx.lineTo(x0 + width * (0.55 + i * 0.05), height + 10);
-    ctx.lineTo(x0 + width * (0.36 + i * 0.04), height + 10);
-    ctx.closePath();
-    ctx.fill();
-  }
-  ctx.restore();
-
-  if (!input.reducedMotion) drawMotes(ctx, width, height, input.time);
-}
-
-function buildBackdrop(width: number, height: number, dpr: number): HTMLCanvasElement | null {
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(width * dpr));
-  canvas.height = Math.max(1, Math.round(height * dpr));
-  const g = canvas.getContext('2d');
-  if (!g) return null;
-  g.scale(dpr, dpr);
-  const wash = g.createLinearGradient(0, 0, width, height);
-  wash.addColorStop(0, '#E2CBAA');
-  wash.addColorStop(0.45, '#F2E5D4');
-  wash.addColorStop(1, '#C9B08C');
-  g.fillStyle = wash;
-  g.fillRect(0, 0, width, height);
-
-  // Faint construction marks left on the desk: compass arcs, rules, a protractor.
-  g.lineCap = 'round';
-  g.strokeStyle = 'rgba(92, 58, 30, 0.07)';
-  g.lineWidth = 1.2;
-  const span = Math.max(width, height);
-  for (let i = 0; i < 7; i += 1) {
-    const cx = hash01(i, 3) * width;
-    const cy = hash01(i, 5) * height;
-    const r = span * (0.12 + hash01(i, 7) * 0.35);
-    const a = hash01(i, 11) * TAU;
-    g.beginPath();
-    g.arc(cx, cy, r, a, a + 0.8 + hash01(i, 13) * 1.8);
-    g.stroke();
-  }
-  g.setLineDash([10, 8]);
-  for (let i = 0; i < 4; i += 1) {
-    const y = height * (0.15 + hash01(i, 17) * 0.7);
-    g.beginPath();
-    g.moveTo(0, y);
-    g.lineTo(width, y + (hash01(i, 19) - 0.5) * height * 0.4);
-    g.stroke();
-  }
-  g.setLineDash([]);
-  const pr = Math.min(width, height) * 0.28;
-  const px0 = width * 0.92;
-  const py0 = height * 0.96;
-  g.beginPath();
-  g.arc(px0, py0, pr, Math.PI, TAU);
-  g.stroke();
-  for (let i = 0; i <= 18; i += 1) {
-    const a = Math.PI + (i / 18) * Math.PI;
-    const inner = pr * (i % 3 === 0 ? 0.86 : 0.93);
-    g.beginPath();
-    g.moveTo(px0 + Math.cos(a) * inner, py0 + Math.sin(a) * inner);
-    g.lineTo(px0 + Math.cos(a) * pr, py0 + Math.sin(a) * pr);
-    g.stroke();
-  }
-
-  const vignette = g.createRadialGradient(width / 2, height * 0.45, span * 0.2, width / 2, height * 0.55, span * 0.75);
-  vignette.addColorStop(0, 'rgba(62, 32, 12, 0)');
-  vignette.addColorStop(1, 'rgba(48, 24, 10, 0.36)');
-  g.fillStyle = vignette;
-  g.fillRect(0, 0, width, height);
-
-  const grain = grainPattern(g);
-  if (grain) {
-    g.globalAlpha = 0.075;
-    g.fillStyle = grain;
-    g.fillRect(0, 0, width, height);
-    g.globalAlpha = 1;
-  }
-  return canvas;
-}
-
-/** Dust hanging in the lamp light. Deterministic in time, so it costs no state. */
-function drawMotes(ctx: CanvasRenderingContext2D, width: number, height: number, time: number): void {
-  ctx.save();
-  for (let i = 0; i < 34; i += 1) {
-    const speed = 0.006 + hash01(i, 23) * 0.014;
-    const y = (1 - ((hash01(i, 29) + time * speed) % 1)) * (height + 20) - 10;
-    const x = hash01(i, 31) * width + Math.sin(time * (0.2 + hash01(i, 37) * 0.3) + i) * 24;
-    const twinkle = 0.5 + 0.5 * Math.sin(time * (0.8 + hash01(i, 41)) + i * 2.1);
-    const size = 0.8 + hash01(i, 43) * 1.8;
-    ctx.globalAlpha = (0.18 + twinkle * 0.42) * (0.4 + hash01(i, 47) * 0.6);
-    ctx.fillStyle = '#FFF7E8';
-    ctx.beginPath();
-    ctx.arc(x, y, size, 0, TAU);
-    ctx.fill();
-  }
-  ctx.restore();
-}
 
 /** The room dims around the board while the ball runs, like a stage. */
 function drawVignette(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
@@ -324,78 +191,6 @@ function drawVignette(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
 /* The drafting sheet                                                  */
 /* ------------------------------------------------------------------ */
 
-/** The drafting table. It reads as blueprint paper while building and as a live stage while the ball runs. */
-function drawTable(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
-  if (input.highContrast) return;
-  const { view } = input.level;
-  const live = input.fx.modeBlend;
-  const pad = 0.18;
-  const x = view.x - pad;
-  const y = view.y - pad;
-  const w = view.w + pad * 2;
-  const h = view.h + pad * 2;
-  ctx.save();
-  // The sheet lifts off the desk with a soft cast shadow.
-  ctx.shadowColor = 'rgba(58, 28, 8, 0.32)';
-  ctx.shadowBlur = 28;
-  ctx.shadowOffsetX = 6;
-  ctx.shadowOffsetY = 12;
-  const sheet = ctx.createLinearGradient(0, y + h, 0, y);
-  sheet.addColorStop(0, '#FFFBF3');
-  sheet.addColorStop(1, '#F6EAD8');
-  ctx.fillStyle = sheet;
-  ctx.beginPath();
-  ctx.roundRect(x, y, w, h, 0.3);
-  ctx.fill();
-  ctx.shadowColor = 'transparent';
-  if (live > 0.01) {
-    ctx.fillStyle = `rgba(255, 236, 210, ${0.3 * live})`;
-    ctx.fill();
-  }
-  // A thin paper edge that catches the light on top and falls away below.
-  ctx.lineWidth = px(input.camera, 1);
-  ctx.strokeStyle = 'rgba(92, 58, 30, 0.18)';
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(x + 0.3, y + h - px(input.camera, 1.5));
-  ctx.lineTo(x + w - 0.3, y + h - px(input.camera, 1.5));
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-  ctx.stroke();
-  if (live > 0.01) {
-    ctx.beginPath();
-    ctx.roundRect(x, y, w, h, 0.3);
-    ctx.strokeStyle = hexAlpha(input.accent, 0.45 * live);
-    ctx.lineWidth = px(input.camera, 2.5);
-    ctx.stroke();
-  }
-  // Masking tape holds the sheet down at its top corners.
-  tape(ctx, x + 0.2, y + h - 0.1, -0.6);
-  tape(ctx, x + w - 0.2, y + h - 0.1, 0.6);
-  tape(ctx, x + 0.2, y + 0.1, 0.6);
-  tape(ctx, x + w - 0.2, y + 0.1, -0.6);
-  ctx.restore();
-}
-
-function tape(ctx: CanvasRenderingContext2D, x: number, y: number, rot: number): void {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(rot);
-  const w = 0.9;
-  const h = 0.26;
-  ctx.fillStyle = 'rgba(250, 236, 196, 0.78)';
-  ctx.beginPath();
-  // Torn ends read as tape rather than a sticker.
-  ctx.moveTo(-w / 2, -h / 2);
-  for (let i = 0; i <= 4; i += 1) ctx.lineTo(-w / 2 + (i % 2 ? 0.03 : 0), -h / 2 + (i / 4) * h);
-  ctx.lineTo(w / 2, h / 2);
-  for (let i = 4; i >= 0; i -= 1) ctx.lineTo(w / 2 - (i % 2 ? 0.03 : 0), -h / 2 + (i / 4) * h);
-  ctx.closePath();
-  ctx.fill();
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
-  ctx.fillRect(-w / 2 + 0.04, h / 2 - 0.07, w - 0.08, 0.035);
-  ctx.restore();
-}
-
 function drawGrid(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const { view } = input.level;
   const minor = input.camera.zoom > 36;
@@ -414,7 +209,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
     ctx.moveTo(view.x, y);
     ctx.lineTo(view.x + view.w, y);
   }
-  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.18)' : 'rgba(29, 78, 216, 0.06)';
+  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.18)' : 'rgba(154, 205, 192, 0.065)';
   ctx.lineWidth = px(input.camera, 1);
   ctx.stroke();
   ctx.beginPath();
@@ -426,7 +221,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
     ctx.moveTo(view.x, y);
     ctx.lineTo(view.x + view.w, y);
   }
-  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.28)' : 'rgba(29, 78, 216, 0.11)';
+  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.28)' : 'rgba(154, 205, 192, 0.12)';
   ctx.lineWidth = px(input.camera, 1.2);
   ctx.stroke();
   if (!input.highContrast) {
@@ -441,7 +236,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
         ctx.lineTo(x, y + c);
       }
     }
-    ctx.strokeStyle = 'rgba(29, 78, 216, 0.35)';
+    ctx.strokeStyle = 'rgba(176, 216, 193, 0.32)';
     ctx.lineWidth = px(input.camera, 1.4);
     ctx.stroke();
   }
@@ -457,7 +252,7 @@ function drawRuler(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const cam = input.camera;
   ctx.save();
   ctx.globalAlpha = fade;
-  ctx.strokeStyle = 'rgba(92, 58, 30, 0.45)';
+  ctx.strokeStyle = 'rgba(174, 201, 183, 0.45)';
   ctx.lineWidth = px(cam, 1);
   ctx.beginPath();
   for (let x = Math.ceil(view.x * 2) / 2; x <= view.x + view.w + 0.001; x += 0.5) {
@@ -476,14 +271,14 @@ function drawRuler(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
     for (let x = Math.ceil(view.x / 2) * 2; x <= view.x + view.w; x += 2) {
       ctx.save();
       ctx.translate(x, view.y + 0.3);
-      worldText(ctx, String(Math.round(x - view.x)), size, 'rgba(92, 58, 30, 0.55)', 500);
+      worldText(ctx, String(Math.round(x - view.x)), size, 'rgba(174, 201, 183, 0.55)', 500);
       ctx.restore();
     }
     for (let y = Math.ceil(view.y / 2) * 2; y <= view.y + view.h; y += 2) {
       if (Math.abs(y - view.y) < 0.5) continue;
       ctx.save();
       ctx.translate(view.x + 0.34, y);
-      worldText(ctx, String(Math.round(y - view.y)), size, 'rgba(92, 58, 30, 0.55)', 500);
+      worldText(ctx, String(Math.round(y - view.y)), size, 'rgba(174, 201, 183, 0.55)', 500);
       ctx.restore();
     }
   }
@@ -584,15 +379,16 @@ function drawGuides(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
 /* ------------------------------------------------------------------ */
 
 function drawGhostPath(ctx: CanvasRenderingContext2D, input: DrawWorld, path: Point[]): void {
-  strokePath(ctx, path, 'rgba(27,36,48,0.08)', px(input.camera, 8));
-  strokePath(ctx, path, 'rgba(27,36,48,0.45)', px(input.camera, 1.6), [0.14, 0.1]);
+  const ink = input.highContrast ? '27,36,48' : '164,199,205';
+  strokePath(ctx, path, `rgba(${ink},0.08)`, px(input.camera, 8));
+  strokePath(ctx, path, `rgba(${ink},0.45)`, px(input.camera, 1.6), [0.14, 0.1]);
   const last = path[path.length - 1];
   if (last) {
     ctx.save();
     ctx.beginPath();
     ctx.arc(last.x, last.y, BALL_R, 0, TAU);
     ctx.setLineDash([px(input.camera, 3), px(input.camera, 3)]);
-    ctx.strokeStyle = 'rgba(27,36,48,0.4)';
+    ctx.strokeStyle = `rgba(${ink},0.4)`;
     ctx.lineWidth = px(input.camera, 1.4);
     ctx.stroke();
     ctx.restore();
@@ -607,7 +403,7 @@ function drawPreview(ctx: CanvasRenderingContext2D, input: DrawWorld, path: Poin
   strokePath(ctx, path, high ? 'rgba(234,88,12,0.25)' : 'rgba(234,88,12,0.12)', px(cam, 12));
   const march = input.reducedMotion ? 0 : input.time * 0.9;
   ctx.save();
-  ctx.fillStyle = '#EA580C';
+  ctx.fillStyle = high ? '#EA580C' : '#F5CF92';
   walkPath(path, 0.2, march % 0.2, (x, y, _angle, along, total) => {
     const k = 1 - along / Math.max(total, 0.01);
     ctx.globalAlpha = 0.35 + k * 0.6;
@@ -616,7 +412,7 @@ function drawPreview(ctx: CanvasRenderingContext2D, input: DrawWorld, path: Poin
     ctx.fill();
   });
   ctx.globalAlpha = 1;
-  ctx.strokeStyle = '#C2410C';
+  ctx.strokeStyle = high ? '#C2410C' : '#F5CF92';
   ctx.lineWidth = px(cam, 2);
   walkPath(path, 1.3, 0.65, (x, y, angle) => {
     ctx.save();
@@ -662,21 +458,32 @@ function drawTrail(ctx: CanvasRenderingContext2D, input: DrawWorld, path: Point[
   const count = Math.min(path.length - 1, 44);
   const start = path.length - 1 - count;
   ctx.save();
+  ctx.globalCompositeOperation = input.highContrast ? 'source-over' : 'screen';
   for (let i = start; i < path.length - 1; i += 1) {
     const a = path[i];
     const b = path[i + 1];
-    if (!a || !b) continue;
+    if (!a || !b || Math.hypot(b.x - a.x, b.y - a.y) > 2.5) continue;
     const k = (i - start + 1) / count;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
     ctx.strokeStyle = hexAlpha(paint.band, 0.05 + k * 0.4);
-    ctx.lineWidth = BALL_R * 2.1 * Math.pow(k, 0.8);
+    ctx.lineWidth = BALL_R * 2.5 * Math.pow(k, 0.8);
     ctx.stroke();
     if (k > 0.35) {
       ctx.strokeStyle = `rgba(255, 244, 222, ${(k - 0.35) * 0.9})`;
       ctx.lineWidth = BALL_R * 0.7 * k;
       ctx.stroke();
+    }
+    if (i % 5 === 0 && k > 0.25) {
+      // Small wake sparks separate from the comet, then fade out behind it.
+      const age = 1 - k;
+      const tangent = Math.atan2(b.y - a.y, b.x - a.x) + Math.PI / 2;
+      const drift = Math.sin(input.time * 3 + i * 2.4) * age * 0.22;
+      ctx.fillStyle = hexAlpha(paint.band, k * 0.65);
+      ctx.beginPath();
+      ctx.arc(a.x + Math.cos(tangent) * drift, a.y + Math.sin(tangent) * drift, px(input.camera, 0.7 + k), 0, TAU);
+      ctx.fill();
     }
   }
   ctx.restore();
@@ -778,7 +585,7 @@ function drawLaunchPad(ctx: CanvasRenderingContext2D, input: DrawWorld, x: numbe
   }
   const spin = input.reducedMotion ? 0 : input.time * 0.6;
   ctx.rotate(spin);
-  ctx.strokeStyle = 'rgba(194, 65, 12, 0.7)';
+  ctx.strokeStyle = input.highContrast ? 'rgba(194, 65, 12, 0.7)' : 'rgba(237, 196, 130, 0.75)';
   ctx.lineWidth = px(cam, 1.4);
   ctx.setLineDash([px(cam, 3), px(cam, 3)]);
   ctx.beginPath();
@@ -971,7 +778,7 @@ function drawBall(ctx: CanvasRenderingContext2D, ball: BallDraw): void {
 /* ------------------------------------------------------------------ */
 
 function drawGoal(ctx: CanvasRenderingContext2D, input: DrawWorld, goal: Goal, met: boolean, selected: boolean): void {
-  const color = met ? '#0F766E' : input.accent;
+  const color = input.highContrast ? (met ? '#0F766E' : '#C2410C') : (met ? '#8CE4C0' : input.accent);
   const reduced = input.reducedMotion;
   const t = reduced ? 0 : input.time;
   const cam = input.camera;
@@ -1133,7 +940,7 @@ function drawHover(pen: Pen, input: DrawWorld, hover: Piece, latched: readonly s
   if (!input.highContrast) {
     const { view } = input.level;
     ctx.save();
-    ctx.strokeStyle = input.hoverOk ? 'rgba(29, 78, 216, 0.28)' : 'rgba(159, 18, 57, 0.28)';
+    ctx.strokeStyle = input.hoverOk ? 'rgba(147, 221, 203, 0.38)' : 'rgba(255, 159, 158, 0.45)';
     ctx.lineWidth = px(cam, 1);
     ctx.setLineDash([px(cam, 4), px(cam, 4)]);
     ctx.beginPath();
@@ -1153,7 +960,7 @@ function drawHover(pen: Pen, input: DrawWorld, hover: Piece, latched: readonly s
   ctx.translate(pose.x, pose.y);
   ctx.rotate(pose.rot);
   if (input.hoverOk && !input.highContrast) {
-    ctx.fillStyle = 'rgba(29, 78, 216, 0.06)';
+    ctx.fillStyle = 'rgba(154, 205, 192, 0.065)';
     ctx.beginPath();
     ctx.roundRect(-hover.w / 2 - 0.06, -hover.h / 2 - 0.06, hover.w + 0.12, hover.h + 0.12, 0.08);
     ctx.fill();
@@ -1161,7 +968,7 @@ function drawHover(pen: Pen, input: DrawWorld, hover: Piece, latched: readonly s
   ctx.lineWidth = px(cam, 1.6);
   ctx.setLineDash([px(cam, 5), px(cam, 4)]);
   ctx.lineDashOffset = input.reducedMotion ? 0 : -input.time * 0.4;
-  ctx.strokeStyle = input.hoverOk ? 'rgba(15,118,110,0.85)' : '#9F1239';
+  ctx.strokeStyle = input.highContrast ? (input.hoverOk ? '#0F766E' : '#9F1239') : (input.hoverOk ? '#93DDCB' : '#FF9F9E');
   ctx.beginPath();
   ctx.roundRect(-hover.w / 2 - 0.06, -hover.h / 2 - 0.06, hover.w + 0.12, hover.h + 0.12, 0.08);
   ctx.stroke();
@@ -1217,6 +1024,31 @@ function drawSelection(ctx: CanvasRenderingContext2D, input: DrawWorld, piece: P
 /* ------------------------------------------------------------------ */
 /* Particles and screen effects                                        */
 /* ------------------------------------------------------------------ */
+
+/** Thin shock fronts turn collisions into a readable, tactile response. */
+function drawResonance(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
+  if (input.reducedMotion || input.highContrast || input.fx.pulses.size === 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (const piece of [...input.level.environment, ...input.pieces]) {
+    const age = input.fx.pulses.get(piece.uid);
+    if (age === undefined || age > 0.55 || piece.kind === 'portal' || piece.kind === 'gravity') continue;
+    const pose = piecePose(piece, input.sim?.t ?? 0, input.sim?.latched ?? [], input.sim?.broken ?? []);
+    const progress = age / 0.55;
+    ctx.save();
+    ctx.translate(pose.x, pose.y);
+    ctx.rotate(pose.rot);
+    const spread = 0.06 + (1 - Math.pow(1 - progress, 3)) * 0.42;
+    const alpha = Math.pow(1 - progress, 2) * 0.6;
+    ctx.strokeStyle = hexAlpha(input.accent, alpha);
+    ctx.lineWidth = px(input.camera, 1.8 * (1 - progress) + 0.3);
+    ctx.beginPath();
+    ctx.roundRect(-piece.w / 2 - spread, -piece.h / 2 - spread, piece.w + spread * 2, piece.h + spread * 2, spread);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
 
 function drawParticles(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const camera = input.camera;
@@ -1432,8 +1264,8 @@ function drawIris(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   ctx.rect(0, 0, width, height);
   ctx.arc(center.x, center.y, r, 0, TAU, true);
   const dark = ctx.createRadialGradient(center.x, center.y, r, center.x, center.y, r + far);
-  dark.addColorStop(0, '#243140');
-  dark.addColorStop(1, '#0B1016');
+  dark.addColorStop(0, '#173B43');
+  dark.addColorStop(1, '#071A22');
   ctx.fillStyle = dark;
   ctx.fill('evenodd');
   ctx.beginPath();
@@ -1470,13 +1302,13 @@ function drawUnderlay(pen: Pen, input: DrawWorld, piece: Piece): void {
   ctx.rotate(piece.rot);
   if (piece.kind === 'mover') {
     const half = (piece.props.distance ?? 2) / 2 + piece.w / 2;
-    ctx.strokeStyle = 'rgba(92, 58, 30, 0.35)';
+    ctx.strokeStyle = pen.high ? 'rgba(92,58,30,0.35)' : 'rgba(177,211,196,0.35)';
     ctx.lineWidth = px(cam, 3);
     ctx.beginPath();
     ctx.moveTo(-half, 0);
     ctx.lineTo(half, 0);
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(92, 58, 30, 0.5)';
+    ctx.strokeStyle = pen.high ? 'rgba(92,58,30,0.5)' : 'rgba(177,211,196,0.5)';
     ctx.lineWidth = px(cam, 1.2);
     ctx.setLineDash([px(cam, 4), px(cam, 4)]);
     ctx.beginPath();
@@ -1492,7 +1324,7 @@ function drawUnderlay(pen: Pen, input: DrawWorld, piece: Piece): void {
     }
   } else {
     const reach = piece.w / 2;
-    ctx.strokeStyle = 'rgba(92, 58, 30, 0.14)';
+    ctx.strokeStyle = pen.high ? 'rgba(92,58,30,0.14)' : 'rgba(177,211,196,0.25)';
     ctx.lineWidth = px(cam, 1.2);
     ctx.setLineDash([px(cam, 3), px(cam, 5)]);
     ctx.beginPath();
@@ -1742,7 +1574,7 @@ function drawBody(pen: Pen, piece: Piece, inactive: boolean, latched: boolean, a
     return;
   }
   if (kind === 'accelerator') {
-    field(pen, w, h, '234, 88, 12', 0.14 + hit * 0.2);
+    field(pen, w, h, pen.high ? '29, 78, 216' : '141, 203, 233', 0.1 + hit * 0.2);
     ctx.save();
     ctx.beginPath();
     ctx.roundRect(-w / 2, -h / 2, w, h, 0.12);
@@ -1754,7 +1586,7 @@ function drawBody(pen: Pen, piece: Piece, inactive: boolean, latched: boolean, a
         const f = (t * (0.9 + hash01(i, 3) * 0.6) + hash01(i, 5)) % 1;
         const x = -w / 2 + f * (w + 0.6) - 0.3;
         const y = (hash01(i, 9) - 0.5) * h * 0.8;
-        ctx.strokeStyle = `rgba(251, 146, 60, ${Math.sin(f * Math.PI) * 0.7})`;
+        ctx.strokeStyle = `rgba(190, 231, 255, ${Math.sin(f * Math.PI) * 0.7})`;
         ctx.beginPath();
         ctx.moveTo(x, y);
         ctx.lineTo(x - 0.35, y);
@@ -1766,18 +1598,18 @@ function drawBody(pen: Pen, piece: Piece, inactive: boolean, latched: boolean, a
     ctx.lineWidth = px(camera, 5);
     chevrons(ctx, w * 0.9, 'x', 4, 'rgba(255, 237, 213, 0.6)');
     ctx.lineWidth = px(camera, 2.2);
-    chevrons(ctx, w * 0.9, 'x', 4, '#C2410C');
+    chevrons(ctx, w * 0.9, 'x', 4, pen.high ? '#1D4ED8' : '#BEE7FF');
     ctx.restore();
     return;
   }
   if (kind === 'gravity') {
-    field(pen, w, h, '109, 40, 217', 0.1 + hit * 0.15);
+    field(pen, w, h, pen.high ? '109, 40, 217' : '182, 164, 239', 0.09 + hit * 0.15);
     ctx.save();
     ctx.beginPath();
     ctx.roundRect(-w / 2, -h / 2, w, h, 0.12);
     ctx.clip();
     // Pressure bands roll along the pull.
-    ctx.strokeStyle = 'rgba(109, 40, 217, 0.18)';
+    ctx.strokeStyle = pen.high ? 'rgba(109, 40, 217, 0.3)' : 'rgba(196, 178, 255, 0.35)';
     ctx.lineWidth = px(camera, 2);
     for (let i = 0; i < 4; i += 1) {
       const f = ((t * 0.25) + i / 4) % 1;
@@ -1795,8 +1627,8 @@ function drawBody(pen: Pen, piece: Piece, inactive: boolean, latched: boolean, a
       const x = -w * 0.42 + f * w * 0.84;
       const a = Math.sin(f * Math.PI) * 0.9;
       const mote = ctx.createRadialGradient(x, y, 0, x, y, 0.1);
-      mote.addColorStop(0, `rgba(139, 92, 246, ${a})`);
-      mote.addColorStop(1, 'rgba(139, 92, 246, 0)');
+      mote.addColorStop(0, `rgba(221, 207, 255, ${a})`);
+      mote.addColorStop(1, 'rgba(182, 164, 239, 0)');
       ctx.fillStyle = mote;
       ctx.beginPath();
       ctx.arc(x, y, 0.1, 0, TAU);
@@ -1808,7 +1640,7 @@ function drawBody(pen: Pen, piece: Piece, inactive: boolean, latched: boolean, a
     ctx.globalAlpha = 0.35;
     arrowHead(ctx, w * 0.28, 0, size * 1.5, '#A78BFA');
     ctx.restore();
-    arrowHead(ctx, w * 0.28, 0, size, '#6D28D9');
+    arrowHead(ctx, w * 0.28, 0, size, pen.high ? '#6D28D9' : '#DDD0FF');
     return;
   }
   if (kind === 'portal') {
@@ -2447,7 +2279,7 @@ function travelBeads(ctx: CanvasRenderingContext2D, points: Point[], time: numbe
   for (let i = 1; i < points.length; i += 1) {
     const a = points[i - 1];
     const b = points[i];
-    if (a && b) total += Math.hypot(b.x - a.x, b.y - a.y);
+    if (a && b) total += pathDistance(a, b);
   }
   if (total < 0.05) return;
   const heads = [0, 1, 2].map((bead) => (time * 2.4 + (bead * total) / 3) % total);
@@ -2478,7 +2310,7 @@ function walkPath(
   for (let i = 1; i < points.length; i += 1) {
     const a = points[i - 1];
     const b = points[i];
-    if (a && b) total += Math.hypot(b.x - a.x, b.y - a.y);
+    if (a && b) total += pathDistance(a, b);
   }
   let next = offset;
   let walked = 0;
@@ -2486,7 +2318,7 @@ function walkPath(
     const a = points[i - 1];
     const b = points[i];
     if (!a || !b) continue;
-    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    const length = pathDistance(a, b);
     if (length <= 0) continue;
     const angle = Math.atan2(b.y - a.y, b.x - a.x);
     while (next <= walked + length) {
@@ -2496,30 +2328,6 @@ function walkPath(
     }
     walked += length;
   }
-}
-
-let grainCanvas: HTMLCanvasElement | null = null;
-
-function grainPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
-  if (!grainCanvas) {
-    grainCanvas = document.createElement('canvas');
-    grainCanvas.width = 128;
-    grainCanvas.height = 128;
-    const grain = grainCanvas.getContext('2d');
-    if (!grain) return null;
-    const image = grain.createImageData(128, 128);
-    let seed = 214013;
-    for (let i = 0; i < image.data.length; i += 4) {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      const value = seed & 255;
-      image.data[i] = value;
-      image.data[i + 1] = value;
-      image.data[i + 2] = value;
-      image.data[i + 3] = 255;
-    }
-    grain.putImageData(image, 0, 0);
-  }
-  return ctx.createPattern(grainCanvas, 'repeat');
 }
 
 function worldText(ctx: CanvasRenderingContext2D, text: string, size: number, color: string, weight = 600): void {
@@ -2541,7 +2349,11 @@ function strokePath(ctx: CanvasRenderingContext2D, points: Point[], color: strin
   ctx.moveTo(first.x, first.y);
   for (let i = 1; i < points.length; i += 1) {
     const point = points[i];
-    if (point) ctx.lineTo(point.x, point.y);
+    const previous = points[i - 1];
+    if (point && previous) {
+      if (Math.hypot(point.x - previous.x, point.y - previous.y) > 2.5) ctx.moveTo(point.x, point.y);
+      else ctx.lineTo(point.x, point.y);
+    }
   }
   ctx.strokeStyle = color;
   ctx.lineWidth = width;
@@ -2557,6 +2369,12 @@ export function linkColor(link: string): string {
   let hash = 0;
   for (let i = 0; i < link.length; i += 1) hash = (hash * 33 + link.charCodeAt(i)) >>> 0;
   return colors[hash % colors.length] ?? '#EA580C';
+}
+
+/** A portal jump is not a flown segment. Keep light trails out of the gap. */
+function pathDistance(a: Point, b: Point): number {
+  const distance = Math.hypot(b.x - a.x, b.y - a.y);
+  return distance > 2.5 ? 0 : distance;
 }
 
 /** Accepts #RRGGBB, or an rgb()/rgba() string whose alpha is replaced. */
