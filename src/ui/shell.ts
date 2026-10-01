@@ -246,9 +246,9 @@ function flash(text: string): string {
 function renderTitle(vm: ViewModel): string {
   return `<div class="title-wrap">
     <section class="title-card" data-enter="title">
-      <div class="mark" aria-hidden="true"><span class="spinner"><span class="ball"></span></span><span class="ring"></span><span class="ring inner"></span></div>
-      <p class="kicker stagger" style="--i:1">Physics puzzle</p>
-      <h1 class="stagger" style="--i:2">Bounce Architect</h1>
+      ${emblem()}
+      <p class="kicker title-kicker stagger" style="--i:1">Physics puzzle</p>
+      <h1 class="wordmark stagger" style="--i:2"><span>Bounce</span> <span>Architect</span></h1>
       <p class="lede stagger" style="--i:3">You don’t control the ball. You engineer the world around it.</p>
       ${
         vm.hasProgress
@@ -575,6 +575,7 @@ function renderPlay(vm: ViewModel): string {
       <div class="tool-row">
         <div class="toolbar card" data-enter="toolbar:${play.visit}">${tools(play)}</div>
         <button data-enter="launch:${play.visit}" class="launch${play.mode === 'run' ? ' again' : ''}" type="button" data-act="${play.mode === 'build' ? 'launch' : 'restart'}" aria-keyshortcuts="Space">
+          <span class="launch-glow" aria-hidden="true"></span>
           <span class="launch-ring" aria-hidden="true"></span>
           ${icon(play.mode === 'build' ? 'play' : 'replay')}
           <span>${play.mode === 'build' ? 'Launch' : 'Again'}</span>
@@ -718,7 +719,8 @@ function result(play: PlayView): string {
   const earned = medals.filter(([, , on]) => on).length;
   const heading = earned === 3 ? 'Flawless.' : earned === 2 ? 'Clean build.' : 'The ring holds.';
   return `<div class="result-veil" data-enter="veil">
-    <section class="result card" role="dialog" aria-labelledby="result-title" data-enter="result">
+    <div class="sunburst" aria-hidden="true"></div>
+    <section class="result card${earned === 3 ? ' flawless' : ''}" role="dialog" aria-labelledby="result-title" data-enter="result">
       <p class="kicker">${esc(play.code ? `${play.code} · Solved` : 'Solved')}</p>
       <h2 id="result-title">${heading}</h2>
       <div class="stamps">
@@ -777,7 +779,26 @@ function intro(play: PlayView): string {
   return `<div class="intro" aria-hidden="true" data-enter="intro:${play.visit}">
     <p class="intro-code">${esc(play.code)}</p>
     <h2>${esc(play.title)}</h2>
+    <span class="intro-rule"></span>
     <p>${esc(play.summary)}</p>
+  </div>`;
+}
+
+/** The title emblem: a ball rolls off a ramp, arcs along its dotted path, and drops into the ring. */
+function emblem(): string {
+  const flight = 'M18 27 L60 35.5 C92 42 118 22 146 42 C162 54 174 62 184 62';
+  return `<div class="emblem" aria-hidden="true">
+    <svg viewBox="0 0 220 110">
+      <path class="em-grid" d="M0 20 H220 M0 50 H220 M0 80 H220 M40 0 V110 M90 0 V110 M140 0 V110 M190 0 V110"/>
+      <path class="em-path" d="${flight}"/>
+      <path class="em-ramp" d="M10 34 L66 45.5"/>
+      <path class="em-ramp" d="M108 84 L168 96"/>
+      <circle class="em-glow" cx="184" cy="62" r="30"/>
+      <circle class="em-ring" cx="184" cy="62" r="21"/>
+      <circle class="em-ring inner" cx="184" cy="62" r="13"/>
+      <path class="em-gem" d="M184 56 L188.5 62 L184 68 L179.5 62 Z"/>
+    </svg>
+    <span class="em-ball" style="offset-path: path('${flight}')"></span>
   </div>`;
 }
 

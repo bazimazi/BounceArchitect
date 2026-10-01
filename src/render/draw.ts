@@ -41,15 +41,43 @@ export interface BallPaint {
   body: [string, string, string];
 }
 
+type Point = { x: number; y: number };
+
+/** Shared per-frame drawing state, so the piece painters stay short. */
+interface Pen {
+  ctx: CanvasRenderingContext2D;
+  camera: Camera;
+  /** Animation clock. Zero under reduced motion so every loop holds still. */
+  t: number;
+  ink: number;
+  high: boolean;
+}
+
+/** A shaded material: light top face, mid body, dark underside, and an ink edge. */
+interface Material {
+  hi: string;
+  mid: string;
+  lo: string;
+  edge: string;
+}
+
+const WOOD: Material = { hi: '#F8E6C0', mid: '#E4B878', lo: '#B9793C', edge: '#5C3A1E' };
+const STEEL: Material = { hi: '#F1F5F9', mid: '#C6D2DD', lo: '#8398AB', edge: '#243140' };
+const RUBBER: Material = { hi: '#4B5767', mid: '#2D3743', lo: '#19222D', edge: '#0E141B' };
+const BRASS: Material = { hi: '#FFE7BD', mid: '#F4AE5E', lo: '#C45C12', edge: '#7C2D12' };
+const GLASS: Material = { hi: 'rgba(240, 253, 255, 0.95)', mid: 'rgba(186, 230, 236, 0.85)', lo: 'rgba(126, 190, 200, 0.9)', edge: '#1F6F78' };
+
 const DEFAULT_BALL: BallPaint = { band: '#EA580C', body: ['#6D7C8E', '#243140', '#0B1016'] };
 
 const TAU = Math.PI * 2;
+/** Where the desk lamp sits: shadows fall down and to the right of every piece. */
+const SHADOW = { x: 0.09, y: -0.13 };
 
 export function drawWorld(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const { width, height, dpr, camera } = input;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
-  paintPaper(ctx, width, height, input.highContrast, input.time, input.reducedMotion);
+  paintBackdrop(ctx, input);
 
   ctx.save();
   if (!input.reducedMotion && input.shake > 0) {
@@ -62,47 +90,47 @@ export function drawWorld(ctx: CanvasRenderingContext2D, input: DrawWorld): void
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
 
+  const pen: Pen = {
+    ctx,
+    camera,
+    t: input.reducedMotion ? 0 : input.time,
+    ink: px(camera, input.highContrast ? 2.4 : 1.5),
+    high: input.highContrast,
+  };
+
   drawTable(ctx, input);
   drawGrid(ctx, input);
+  drawRuler(ctx, input);
   drawKill(ctx, input);
-  for (const path of input.ghost) {
-    strokePath(ctx, path, 'rgba(27,36,48,0.1)', px(camera, 7));
-    strokePath(ctx, path, 'rgba(27,36,48,0.5)', px(camera, 1.8), [0.14, 0.1]);
-  }
-  for (const path of input.preview) {
-    strokePath(ctx, path, 'rgba(234,88,12,0.16)', px(camera, 10));
-    strokePath(ctx, path, 'rgba(234,88,12,0.9)', px(camera, 2.2), [0.16, 0.1], input.reducedMotion ? 0 : -input.time * 0.6);
-    const last = path[path.length - 1];
-    if (last) {
-      ctx.beginPath();
-      ctx.arc(last.x, last.y, 0.08, 0, TAU);
-      ctx.fillStyle = '#EA580C';
-      ctx.fill();
-    }
-    if (!input.reducedMotion && !input.highContrast) travelBeads(ctx, path, input.time);
-  }
-  for (const path of input.trail) drawTrail(ctx, input, path);
+  drawStageLight(ctx, input);
+
+  for (const path of input.ghost) drawGhostPath(ctx, input, path);
+  for (const path of input.preview) drawPreview(ctx, input, path);
+  const paint = input.ball ?? DEFAULT_BALL;
+  for (const path of input.trail) drawTrail(ctx, input, path, paint);
 
   const latched = input.sim?.latched ?? [];
   const broken = input.sim?.broken ?? [];
-  const anim = input.reducedMotion ? 0 : input.time;
   const all = [...input.level.environment, ...input.pieces, ...(input.hover ? [input.hover] : [])];
-  for (const piece of input.level.environment) drawPiece(ctx, input, piece, false, latched, broken, anim, all);
-  for (const piece of input.pieces) drawPiece(ctx, input, piece, true, latched, broken, anim, all);
-  if (input.hover) drawHover(ctx, input, input.hover, latched, broken, anim, all);
+  const placed = [...input.level.environment, ...input.pieces];
+  for (const piece of placed) drawUnderlay(pen, input, piece);
+  if (!input.highContrast) for (const piece of placed) drawShadow(ctx, input, piece, latched, broken);
+  for (const piece of input.level.environment) drawPiece(pen, input, piece, false, latched, broken, all);
+  for (const piece of input.pieces) drawPiece(pen, input, piece, true, latched, broken, all);
+  if (input.hover) drawHover(pen, input, input.hover, latched, broken, all);
 
   const met = new Set(input.sim?.goalsMet ?? []);
   for (const goal of input.goals) {
     drawGoal(ctx, input, goal, met.has(goal.id), input.selected.includes(`goal:${goal.id}`));
   }
   drawGuides(ctx, input);
-  drawBalls(ctx, input);
+  drawBalls(ctx, input, paint);
   drawParticles(ctx, input);
 
   if (input.showColliders) {
     ctx.strokeStyle = 'rgba(190,24,93,0.8)';
     ctx.lineWidth = px(camera, 1);
-    for (const piece of [...input.level.environment, ...input.pieces]) {
+    for (const piece of placed) {
       const pose = piecePose(piece, input.sim?.t ?? 0, latched, broken);
       ctx.save();
       ctx.translate(pose.x, pose.y);
@@ -119,6 +147,8 @@ export function drawWorld(ctx: CanvasRenderingContext2D, input: DrawWorld): void
   }
   ctx.restore();
 
+  drawVignette(ctx, input);
+  drawRays(ctx, input);
   drawFlash(ctx, input);
   drawIris(ctx, input);
 
@@ -134,81 +164,235 @@ export function drawWorld(ctx: CanvasRenderingContext2D, input: DrawWorld): void
   }
 }
 
-function paintPaper(
-  ctx: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  high: boolean,
-  time: number,
-  reduced: boolean,
-): void {
-  if (high) {
+/* ------------------------------------------------------------------ */
+/* The room: paper, lamp light, drifting dust                          */
+/* ------------------------------------------------------------------ */
+
+let backCache: { key: string; canvas: HTMLCanvasElement } | null = null;
+
+function paintBackdrop(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
+  const { width, height, dpr } = input;
+  if (input.highContrast) {
     ctx.fillStyle = '#FFFFFF';
     ctx.fillRect(0, 0, width, height);
     return;
   }
-  const wash = ctx.createLinearGradient(0, 0, width, height);
-  wash.addColorStop(0, '#E7D3B8');
-  wash.addColorStop(0.42, '#F4EADF');
-  wash.addColorStop(1, '#CDB89A');
-  ctx.fillStyle = wash;
-  ctx.fillRect(0, 0, width, height);
+  const key = `${width}|${height}|${dpr}`;
+  if (!backCache || backCache.key !== key) {
+    const canvas = buildBackdrop(width, height, dpr);
+    if (canvas) backCache = { key, canvas };
+  }
+  if (backCache) ctx.drawImage(backCache.canvas, 0, 0, width, height);
 
-  const drift = reduced ? 0 : time;
-  const lampX = width * (0.46 + Math.sin(drift * 0.17) * 0.03);
-  const lampY = height * (0.38 + Math.cos(drift * 0.13) * 0.02);
-  const lamp = ctx.createRadialGradient(lampX, lampY, 20, lampX, lampY, width * 0.55);
-  lamp.addColorStop(0, 'rgba(255, 214, 156, 0.55)');
-  lamp.addColorStop(0.4, 'rgba(255, 160, 80, 0.12)');
+  const drift = input.reducedMotion ? 0 : input.time;
+  const lampX = width * (0.42 + Math.sin(drift * 0.17) * 0.03);
+  const lampY = height * (0.32 + Math.cos(drift * 0.13) * 0.02);
+  const lamp = ctx.createRadialGradient(lampX, lampY, 20, lampX, lampY, Math.max(width, height) * 0.62);
+  lamp.addColorStop(0, 'rgba(255, 222, 170, 0.6)');
+  lamp.addColorStop(0.35, 'rgba(255, 176, 96, 0.16)');
   lamp.addColorStop(1, 'rgba(255, 160, 80, 0)');
   ctx.fillStyle = lamp;
   ctx.fillRect(0, 0, width, height);
 
-  const coolX = width * (0.78 + Math.cos(drift * 0.11) * 0.04);
-  const coolY = height * (0.18 + Math.sin(drift * 0.09) * 0.03);
-  const cool = ctx.createRadialGradient(coolX, coolY, 8, coolX, coolY, width * 0.28);
-  cool.addColorStop(0, 'rgba(255, 248, 230, 0.4)');
-  cool.addColorStop(1, 'rgba(255, 248, 230, 0)');
-  ctx.fillStyle = cool;
-  ctx.fillRect(0, 0, width, height);
-
-  const vignette = ctx.createRadialGradient(width / 2, height / 2, width * 0.18, width / 2, height * 0.55, width * 0.72);
-  vignette.addColorStop(0, 'rgba(62, 32, 12, 0)');
-  vignette.addColorStop(1, 'rgba(48, 24, 10, 0.34)');
-  ctx.fillStyle = vignette;
-  ctx.fillRect(0, 0, width, height);
-
-  const grain = grainPattern(ctx);
-  if (grain) {
-    ctx.save();
-    ctx.globalAlpha = 0.07;
-    ctx.fillStyle = grain;
-    ctx.fillRect(0, 0, width, height);
-    ctx.restore();
+  // Soft shafts of lamp light falling across the desk.
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (let i = 0; i < 3; i += 1) {
+    const sway = Math.sin(drift * 0.11 + i * 1.7) * width * 0.03;
+    const x0 = width * (0.05 + i * 0.2) + sway;
+    const beam = ctx.createLinearGradient(x0, 0, x0 + width * 0.45, height);
+    beam.addColorStop(0, 'rgba(255, 236, 200, 0.14)');
+    beam.addColorStop(1, 'rgba(255, 236, 200, 0)');
+    ctx.fillStyle = beam;
+    ctx.beginPath();
+    ctx.moveTo(x0, -10);
+    ctx.lineTo(x0 + width * (0.07 + i * 0.02), -10);
+    ctx.lineTo(x0 + width * (0.55 + i * 0.05), height + 10);
+    ctx.lineTo(x0 + width * (0.36 + i * 0.04), height + 10);
+    ctx.closePath();
+    ctx.fill();
   }
+  ctx.restore();
+
+  if (!input.reducedMotion) drawMotes(ctx, width, height, input.time);
 }
+
+function buildBackdrop(width: number, height: number, dpr: number): HTMLCanvasElement | null {
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * dpr));
+  canvas.height = Math.max(1, Math.round(height * dpr));
+  const g = canvas.getContext('2d');
+  if (!g) return null;
+  g.scale(dpr, dpr);
+  const wash = g.createLinearGradient(0, 0, width, height);
+  wash.addColorStop(0, '#E2CBAA');
+  wash.addColorStop(0.45, '#F2E5D4');
+  wash.addColorStop(1, '#C9B08C');
+  g.fillStyle = wash;
+  g.fillRect(0, 0, width, height);
+
+  // Faint construction marks left on the desk: compass arcs, rules, a protractor.
+  g.lineCap = 'round';
+  g.strokeStyle = 'rgba(92, 58, 30, 0.07)';
+  g.lineWidth = 1.2;
+  const span = Math.max(width, height);
+  for (let i = 0; i < 7; i += 1) {
+    const cx = hash01(i, 3) * width;
+    const cy = hash01(i, 5) * height;
+    const r = span * (0.12 + hash01(i, 7) * 0.35);
+    const a = hash01(i, 11) * TAU;
+    g.beginPath();
+    g.arc(cx, cy, r, a, a + 0.8 + hash01(i, 13) * 1.8);
+    g.stroke();
+  }
+  g.setLineDash([10, 8]);
+  for (let i = 0; i < 4; i += 1) {
+    const y = height * (0.15 + hash01(i, 17) * 0.7);
+    g.beginPath();
+    g.moveTo(0, y);
+    g.lineTo(width, y + (hash01(i, 19) - 0.5) * height * 0.4);
+    g.stroke();
+  }
+  g.setLineDash([]);
+  const pr = Math.min(width, height) * 0.28;
+  const px0 = width * 0.92;
+  const py0 = height * 0.96;
+  g.beginPath();
+  g.arc(px0, py0, pr, Math.PI, TAU);
+  g.stroke();
+  for (let i = 0; i <= 18; i += 1) {
+    const a = Math.PI + (i / 18) * Math.PI;
+    const inner = pr * (i % 3 === 0 ? 0.86 : 0.93);
+    g.beginPath();
+    g.moveTo(px0 + Math.cos(a) * inner, py0 + Math.sin(a) * inner);
+    g.lineTo(px0 + Math.cos(a) * pr, py0 + Math.sin(a) * pr);
+    g.stroke();
+  }
+
+  const vignette = g.createRadialGradient(width / 2, height * 0.45, span * 0.2, width / 2, height * 0.55, span * 0.75);
+  vignette.addColorStop(0, 'rgba(62, 32, 12, 0)');
+  vignette.addColorStop(1, 'rgba(48, 24, 10, 0.36)');
+  g.fillStyle = vignette;
+  g.fillRect(0, 0, width, height);
+
+  const grain = grainPattern(g);
+  if (grain) {
+    g.globalAlpha = 0.075;
+    g.fillStyle = grain;
+    g.fillRect(0, 0, width, height);
+    g.globalAlpha = 1;
+  }
+  return canvas;
+}
+
+/** Dust hanging in the lamp light. Deterministic in time, so it costs no state. */
+function drawMotes(ctx: CanvasRenderingContext2D, width: number, height: number, time: number): void {
+  ctx.save();
+  for (let i = 0; i < 34; i += 1) {
+    const speed = 0.006 + hash01(i, 23) * 0.014;
+    const y = (1 - ((hash01(i, 29) + time * speed) % 1)) * (height + 20) - 10;
+    const x = hash01(i, 31) * width + Math.sin(time * (0.2 + hash01(i, 37) * 0.3) + i) * 24;
+    const twinkle = 0.5 + 0.5 * Math.sin(time * (0.8 + hash01(i, 41)) + i * 2.1);
+    const size = 0.8 + hash01(i, 43) * 1.8;
+    ctx.globalAlpha = (0.18 + twinkle * 0.42) * (0.4 + hash01(i, 47) * 0.6);
+    ctx.fillStyle = '#FFF7E8';
+    ctx.beginPath();
+    ctx.arc(x, y, size, 0, TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** The room dims around the board while the ball runs, like a stage. */
+function drawVignette(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
+  if (input.highContrast) return;
+  const live = input.fx.modeBlend;
+  if (live < 0.01) return;
+  const { width, height, dpr } = input;
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const span = Math.max(width, height);
+  const dim = ctx.createRadialGradient(width / 2, height / 2, span * 0.3, width / 2, height / 2, span * 0.78);
+  dim.addColorStop(0, 'rgba(30, 16, 6, 0)');
+  dim.addColorStop(1, `rgba(30, 16, 6, ${0.28 * live})`);
+  ctx.fillStyle = dim;
+  ctx.fillRect(0, 0, width, height);
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ */
+/* The drafting sheet                                                  */
+/* ------------------------------------------------------------------ */
 
 /** The drafting table. It reads as blueprint paper while building and as a live stage while the ball runs. */
 function drawTable(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   if (input.highContrast) return;
   const { view } = input.level;
   const live = input.fx.modeBlend;
+  const pad = 0.18;
+  const x = view.x - pad;
+  const y = view.y - pad;
+  const w = view.w + pad * 2;
+  const h = view.h + pad * 2;
   ctx.save();
-  ctx.fillStyle = 'rgba(255, 250, 242, 0.55)';
+  // The sheet lifts off the desk with a soft cast shadow.
+  ctx.shadowColor = 'rgba(58, 28, 8, 0.32)';
+  ctx.shadowBlur = 28;
+  ctx.shadowOffsetX = 6;
+  ctx.shadowOffsetY = 12;
+  const sheet = ctx.createLinearGradient(0, y + h, 0, y);
+  sheet.addColorStop(0, '#FFFBF3');
+  sheet.addColorStop(1, '#F6EAD8');
+  ctx.fillStyle = sheet;
   ctx.beginPath();
-  ctx.roundRect(view.x - 0.15, view.y - 0.15, view.w + 0.3, view.h + 0.3, 0.4);
+  ctx.roundRect(x, y, w, h, 0.3);
   ctx.fill();
+  ctx.shadowColor = 'transparent';
   if (live > 0.01) {
-    ctx.fillStyle = `rgba(255, 244, 228, ${0.35 * live})`;
+    ctx.fillStyle = `rgba(255, 236, 210, ${0.3 * live})`;
     ctx.fill();
-    ctx.strokeStyle = hexAlpha(input.accent, 0.35 * live);
-    ctx.lineWidth = px(input.camera, 2);
-    ctx.stroke();
-  } else {
-    ctx.strokeStyle = 'rgba(92, 58, 30, 0.14)';
-    ctx.lineWidth = px(input.camera, 1);
+  }
+  // A thin paper edge that catches the light on top and falls away below.
+  ctx.lineWidth = px(input.camera, 1);
+  ctx.strokeStyle = 'rgba(92, 58, 30, 0.18)';
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x + 0.3, y + h - px(input.camera, 1.5));
+  ctx.lineTo(x + w - 0.3, y + h - px(input.camera, 1.5));
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+  ctx.stroke();
+  if (live > 0.01) {
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 0.3);
+    ctx.strokeStyle = hexAlpha(input.accent, 0.45 * live);
+    ctx.lineWidth = px(input.camera, 2.5);
     ctx.stroke();
   }
+  // Masking tape holds the sheet down at its top corners.
+  tape(ctx, x + 0.2, y + h - 0.1, -0.6);
+  tape(ctx, x + w - 0.2, y + h - 0.1, 0.6);
+  tape(ctx, x + 0.2, y + 0.1, 0.6);
+  tape(ctx, x + w - 0.2, y + 0.1, -0.6);
+  ctx.restore();
+}
+
+function tape(ctx: CanvasRenderingContext2D, x: number, y: number, rot: number): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rot);
+  const w = 0.9;
+  const h = 0.26;
+  ctx.fillStyle = 'rgba(250, 236, 196, 0.78)';
+  ctx.beginPath();
+  // Torn ends read as tape rather than a sticker.
+  ctx.moveTo(-w / 2, -h / 2);
+  for (let i = 0; i <= 4; i += 1) ctx.lineTo(-w / 2 + (i % 2 ? 0.03 : 0), -h / 2 + (i / 4) * h);
+  ctx.lineTo(w / 2, h / 2);
+  for (let i = 4; i >= 0; i -= 1) ctx.lineTo(w / 2 - (i % 2 ? 0.03 : 0), -h / 2 + (i / 4) * h);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.35)';
+  ctx.fillRect(-w / 2 + 0.04, h / 2 - 0.07, w - 0.08, 0.035);
   ctx.restore();
 }
 
@@ -230,7 +414,7 @@ function drawGrid(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
     ctx.moveTo(view.x, y);
     ctx.lineTo(view.x + view.w, y);
   }
-  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.18)' : 'rgba(92, 58, 30, 0.08)';
+  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.18)' : 'rgba(29, 78, 216, 0.06)';
   ctx.lineWidth = px(input.camera, 1);
   ctx.stroke();
   ctx.beginPath();
@@ -242,13 +426,13 @@ function drawGrid(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
     ctx.moveTo(view.x, y);
     ctx.lineTo(view.x + view.w, y);
   }
-  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.28)' : 'rgba(92, 58, 30, 0.15)';
-  ctx.lineWidth = px(input.camera, 1.25);
+  ctx.strokeStyle = input.highContrast ? 'rgba(0,0,0,0.28)' : 'rgba(29, 78, 216, 0.11)';
+  ctx.lineWidth = px(input.camera, 1.2);
   ctx.stroke();
   if (!input.highContrast) {
     // Registration crosses on every fourth intersection, like a cutting mat.
     ctx.beginPath();
-    const c = 0.07;
+    const c = 0.08;
     for (let x = Math.ceil(view.x / 4) * 4; x <= view.x + view.w; x += 4) {
       for (let y = Math.ceil(view.y / 4) * 4; y <= view.y + view.h; y += 4) {
         ctx.moveTo(x - c, y);
@@ -257,40 +441,123 @@ function drawGrid(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
         ctx.lineTo(x, y + c);
       }
     }
-    ctx.strokeStyle = 'rgba(92, 58, 30, 0.4)';
+    ctx.strokeStyle = 'rgba(29, 78, 216, 0.35)';
     ctx.lineWidth = px(input.camera, 1.4);
     ctx.stroke();
   }
   ctx.restore();
 }
 
+/** Ruler ticks along the sheet's bottom and left edges, with a number every two units. */
+function drawRuler(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
+  if (input.highContrast) return;
+  const fade = 1 - input.fx.modeBlend * 0.8;
+  if (fade < 0.05) return;
+  const { view } = input.level;
+  const cam = input.camera;
+  ctx.save();
+  ctx.globalAlpha = fade;
+  ctx.strokeStyle = 'rgba(92, 58, 30, 0.45)';
+  ctx.lineWidth = px(cam, 1);
+  ctx.beginPath();
+  for (let x = Math.ceil(view.x * 2) / 2; x <= view.x + view.w + 0.001; x += 0.5) {
+    const major = Math.abs(x - Math.round(x)) < 0.01;
+    ctx.moveTo(x, view.y);
+    ctx.lineTo(x, view.y + (major ? 0.16 : 0.08));
+  }
+  for (let y = Math.ceil(view.y * 2) / 2; y <= view.y + view.h + 0.001; y += 0.5) {
+    const major = Math.abs(y - Math.round(y)) < 0.01;
+    ctx.moveTo(view.x, y);
+    ctx.lineTo(view.x + (major ? 0.16 : 0.08), y);
+  }
+  ctx.stroke();
+  if (cam.zoom > 28) {
+    const size = px(cam, 9);
+    for (let x = Math.ceil(view.x / 2) * 2; x <= view.x + view.w; x += 2) {
+      ctx.save();
+      ctx.translate(x, view.y + 0.3);
+      worldText(ctx, String(Math.round(x - view.x)), size, 'rgba(92, 58, 30, 0.55)', 500);
+      ctx.restore();
+    }
+    for (let y = Math.ceil(view.y / 2) * 2; y <= view.y + view.h; y += 2) {
+      if (Math.abs(y - view.y) < 0.5) continue;
+      ctx.save();
+      ctx.translate(view.x + 0.34, y);
+      worldText(ctx, String(Math.round(y - view.y)), size, 'rgba(92, 58, 30, 0.55)', 500);
+      ctx.restore();
+    }
+  }
+  ctx.restore();
+}
+
 function drawKill(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const { view } = input.level;
-  const y = input.level.killY;
+  // A kill line below the sheet is marked along the sheet's bottom edge instead, so it stays on the paper.
+  const y = Math.max(input.level.killY, view.y - 0.1);
+  const stripe = 0.2;
   ctx.save();
   if (!input.highContrast) {
-    const band = ctx.createLinearGradient(0, y, 0, y - 0.9);
+    ctx.beginPath();
+    ctx.rect(view.x - 0.18, view.y - 0.18, view.w + 0.36, view.h + 0.36);
+    ctx.clip();
+    const band = ctx.createLinearGradient(0, y, 0, y + 1.1);
     band.addColorStop(0, 'rgba(159,18,57,0.14)');
     band.addColorStop(1, 'rgba(159,18,57,0)');
     ctx.fillStyle = band;
-    ctx.fillRect(view.x, y - 0.9, view.w, 0.9);
+    ctx.fillRect(view.x - 0.18, y, view.w + 0.36, 1.1);
+    // Hazard stripes just under the line, drifting slowly.
+    ctx.beginPath();
+    ctx.rect(view.x - 0.18, y - stripe, view.w + 0.36, stripe);
+    ctx.clip();
+    ctx.fillStyle = 'rgba(159,18,57,0.12)';
+    ctx.fillRect(view.x - 0.18, y - stripe, view.w + 0.36, stripe);
+    const slide = input.reducedMotion ? 0 : (input.time * 0.25) % 0.5;
+    ctx.fillStyle = 'rgba(159,18,57,0.3)';
+    for (let x = view.x - 0.7 + slide; x < view.x + view.w + 0.5; x += 0.5) {
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + 0.25, y);
+      ctx.lineTo(x + 0.25 - stripe, y - stripe);
+      ctx.lineTo(x - stripe, y - stripe);
+      ctx.closePath();
+      ctx.fill();
+    }
   }
+  ctx.restore();
+  ctx.save();
   ctx.beginPath();
-  ctx.moveTo(view.x, y);
-  ctx.lineTo(view.x + view.w, y);
-  ctx.strokeStyle = input.highContrast ? '#9F1239' : 'rgba(159,18,57,0.65)';
-  ctx.lineWidth = px(input.camera, 1.5);
+  ctx.moveTo(view.x - 0.1, y);
+  ctx.lineTo(view.x + view.w + 0.1, y);
+  ctx.strokeStyle = input.highContrast ? '#9F1239' : 'rgba(159,18,57,0.75)';
+  ctx.lineWidth = px(input.camera, 1.6);
   ctx.setLineDash([0.16, 0.12]);
   ctx.lineDashOffset = input.reducedMotion ? 0 : input.time * 0.2;
   ctx.stroke();
   ctx.restore();
 }
 
+/** A warm pool of light that follows the ball while it runs. */
+function drawStageLight(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
+  if (input.highContrast || !input.sim || input.mode !== 'run') return;
+  const live = input.fx.modeBlend;
+  for (const ball of input.sim.balls) {
+    if (!ball.alive) continue;
+    const r = 3.4;
+    const pool = ctx.createRadialGradient(ball.x, ball.y, 0, ball.x, ball.y, r);
+    pool.addColorStop(0, `rgba(255, 214, 150, ${0.34 * live})`);
+    pool.addColorStop(0.5, `rgba(255, 190, 120, ${0.1 * live})`);
+    pool.addColorStop(1, 'rgba(255, 190, 120, 0)');
+    ctx.fillStyle = pool;
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, r, 0, TAU);
+    ctx.fill();
+  }
+}
+
 function drawGuides(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   if (input.guides.length === 0) return;
   const { view } = input.level;
   ctx.save();
-  ctx.strokeStyle = 'rgba(234,88,12,0.75)';
   ctx.lineWidth = px(input.camera, 1.25);
   ctx.setLineDash([0.1, 0.08]);
   for (const guide of input.guides) {
@@ -302,19 +569,99 @@ function drawGuides(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
       ctx.moveTo(view.x, guide.at);
       ctx.lineTo(view.x + view.w, guide.at);
     }
+    ctx.strokeStyle = 'rgba(234,88,12,0.18)';
+    ctx.lineWidth = px(input.camera, 5);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(234,88,12,0.85)';
+    ctx.lineWidth = px(input.camera, 1.25);
     ctx.stroke();
   }
   ctx.restore();
 }
 
-/** A faint full path to read later, plus a bright tapered comet behind the ball. */
-function drawTrail(ctx: CanvasRenderingContext2D, input: DrawWorld, path: { x: number; y: number }[]): void {
+/* ------------------------------------------------------------------ */
+/* Paths: prediction, the last run, and the live comet                 */
+/* ------------------------------------------------------------------ */
+
+function drawGhostPath(ctx: CanvasRenderingContext2D, input: DrawWorld, path: Point[]): void {
+  strokePath(ctx, path, 'rgba(27,36,48,0.08)', px(input.camera, 8));
+  strokePath(ctx, path, 'rgba(27,36,48,0.45)', px(input.camera, 1.6), [0.14, 0.1]);
+  const last = path[path.length - 1];
+  if (last) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, BALL_R, 0, TAU);
+    ctx.setLineDash([px(input.camera, 3), px(input.camera, 3)]);
+    ctx.strokeStyle = 'rgba(27,36,48,0.4)';
+    ctx.lineWidth = px(input.camera, 1.4);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+/** The predicted flight: glowing dots that march along, direction chevrons, and a ghost ball at the end. */
+function drawPreview(ctx: CanvasRenderingContext2D, input: DrawWorld, path: Point[]): void {
   if (path.length < 2) return;
-  strokePath(ctx, path, 'rgba(234,88,12,0.14)', px(input.camera, 6));
-  strokePath(ctx, path, 'rgba(234,88,12,0.4)', px(input.camera, 1.4));
+  const cam = input.camera;
+  const high = input.highContrast;
+  strokePath(ctx, path, high ? 'rgba(234,88,12,0.25)' : 'rgba(234,88,12,0.12)', px(cam, 12));
+  const march = input.reducedMotion ? 0 : input.time * 0.9;
+  ctx.save();
+  ctx.fillStyle = '#EA580C';
+  walkPath(path, 0.2, march % 0.2, (x, y, _angle, along, total) => {
+    const k = 1 - along / Math.max(total, 0.01);
+    ctx.globalAlpha = 0.35 + k * 0.6;
+    ctx.beginPath();
+    ctx.arc(x, y, px(cam, 1.6 + k * 1.6), 0, TAU);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = '#C2410C';
+  ctx.lineWidth = px(cam, 2);
+  walkPath(path, 1.3, 0.65, (x, y, angle) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    const s = px(cam, 6);
+    ctx.beginPath();
+    ctx.moveTo(-s * 0.6, s);
+    ctx.lineTo(s * 0.5, 0);
+    ctx.lineTo(-s * 0.6, -s);
+    ctx.stroke();
+    ctx.restore();
+  });
+  ctx.restore();
+  const last = path[path.length - 1];
+  if (last) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, BALL_R, 0, TAU);
+    ctx.fillStyle = 'rgba(234,88,12,0.12)';
+    ctx.fill();
+    ctx.setLineDash([px(cam, 4), px(cam, 3)]);
+    ctx.lineDashOffset = input.reducedMotion ? 0 : -input.time * 0.3;
+    ctx.strokeStyle = 'rgba(234,88,12,0.9)';
+    ctx.lineWidth = px(cam, 1.6);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, px(cam, 2.5), 0, TAU);
+    ctx.fillStyle = '#EA580C';
+    ctx.fill();
+    ctx.restore();
+  }
+  if (!input.reducedMotion && !high) travelBeads(ctx, path, input.time);
+}
+
+/** A faint full path to read later, plus a bright tapered comet behind the ball. */
+function drawTrail(ctx: CanvasRenderingContext2D, input: DrawWorld, path: Point[], paint: BallPaint): void {
+  if (path.length < 2) return;
+  strokePath(ctx, path, hexAlpha(paint.band, 0.1), px(input.camera, 6));
+  strokePath(ctx, path, hexAlpha(paint.band, 0.38), px(input.camera, 1.3));
   if (input.reducedMotion || input.mode !== 'run' || input.sim?.phase === 'lost') return;
-  const count = Math.min(path.length - 1, 34);
+  const count = Math.min(path.length - 1, 44);
   const start = path.length - 1 - count;
+  ctx.save();
   for (let i = start; i < path.length - 1; i += 1) {
     const a = path[i];
     const b = path[i + 1];
@@ -323,18 +670,27 @@ function drawTrail(ctx: CanvasRenderingContext2D, input: DrawWorld, path: { x: n
     ctx.beginPath();
     ctx.moveTo(a.x, a.y);
     ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = `rgba(251, 146, 60, ${0.08 + k * 0.5})`;
-    ctx.lineWidth = BALL_R * 1.6 * k;
+    ctx.strokeStyle = hexAlpha(paint.band, 0.05 + k * 0.4);
+    ctx.lineWidth = BALL_R * 2.1 * Math.pow(k, 0.8);
     ctx.stroke();
+    if (k > 0.35) {
+      ctx.strokeStyle = `rgba(255, 244, 222, ${(k - 0.35) * 0.9})`;
+      ctx.lineWidth = BALL_R * 0.7 * k;
+      ctx.stroke();
+    }
   }
+  ctx.restore();
 }
 
-function drawBalls(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
-  const paint = input.ball ?? DEFAULT_BALL;
+/* ------------------------------------------------------------------ */
+/* The ball                                                            */
+/* ------------------------------------------------------------------ */
+
+function drawBalls(ctx: CanvasRenderingContext2D, input: DrawWorld, paint: BallPaint): void {
   if (input.mode === 'run' && input.sim) {
     const many = input.sim.balls.length > 1;
-    for (const ball of input.sim.balls) {
-      if (!ball.alive && ball.y < input.level.killY) continue;
+    input.sim.balls.forEach((ball, index) => {
+      if (!ball.alive && ball.y < input.level.killY) return;
       const fx = input.fx.balls.get(ball.id);
       let sx = 0;
       let sy = 0;
@@ -344,22 +700,35 @@ function drawBalls(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
         sx = fx.nx;
         sy = fx.ny;
       }
-      drawBall(ctx, ball.x, ball.y, ball.r, ball.vx, ball.vy, input.reducedMotion, fx?.spin ?? 0, squash, sx, sy, paint, many ? ball.id.toUpperCase() : undefined);
-    }
+      const speed = Math.hypot(ball.vx, ball.vy);
+      if (!input.reducedMotion && !input.highContrast && ball.alive) {
+        drawAfterimages(ctx, input.trail[index] ?? [], ball.r, speed, paint);
+        drawSpeedLines(ctx, ball.x, ball.y, ball.vx, ball.vy, ball.r, input.camera, input.time);
+      }
+      drawBall(ctx, {
+        x: ball.x,
+        y: ball.y,
+        r: ball.r,
+        vx: ball.vx,
+        vy: ball.vy,
+        reduced: input.reducedMotion,
+        spin: fx?.spin ?? 0,
+        squash,
+        nx: sx,
+        ny: sy,
+        paint,
+        letter: many ? ball.id.toUpperCase() : undefined,
+        glow: input.highContrast ? 0 : clamp01((speed - 3) / 10),
+        camera: input.camera,
+      });
+    });
     return;
   }
   const many = input.starts.length > 1;
   for (const start of input.starts) {
     const r = start.r ?? BALL_R;
     const selected = input.selected.includes(`start:${start.id}`);
-    if (input.mode === 'build' && !input.highContrast) {
-      const beat = input.reducedMotion ? 0.5 : (input.time * 0.8) % 1;
-      ctx.beginPath();
-      ctx.arc(start.x, start.y, r * (1.3 + beat * 1.1), 0, TAU);
-      ctx.strokeStyle = `rgba(234, 88, 12, ${0.45 * (1 - beat)})`;
-      ctx.lineWidth = px(input.camera, 1.5);
-      ctx.stroke();
-    }
+    if (input.mode === 'build') drawLaunchPad(ctx, input, start.x, start.y, r);
     if (selected) {
       ctx.beginPath();
       ctx.arc(start.x, start.y, r + 0.12, 0, TAU);
@@ -367,95 +736,245 @@ function drawBalls(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
       ctx.lineWidth = px(input.camera, 1.5);
       ctx.stroke();
     }
-    drawBall(ctx, start.x, start.y, r, 0, 0, true, 0, 0, 0, 0, paint, many ? start.id.toUpperCase() : undefined);
+    const bob = input.reducedMotion || input.mode !== 'build' ? 0 : Math.sin(input.time * 2.2) * 0.025;
+    drawBall(ctx, {
+      x: start.x,
+      y: start.y + bob,
+      r,
+      vx: 0,
+      vy: 0,
+      reduced: true,
+      spin: input.reducedMotion ? 0 : Math.sin(input.time * 0.9) * 0.25,
+      squash: 0,
+      nx: 0,
+      ny: 0,
+      paint,
+      letter: many ? start.id.toUpperCase() : undefined,
+      glow: 0,
+      camera: input.camera,
+    });
   }
 }
 
-function drawBall(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  r: number,
-  vx: number,
-  vy: number,
-  reduced: boolean,
-  spin: number,
-  squash: number,
-  nx: number,
-  ny: number,
-  paint: BallPaint,
-  letter?: string,
-): void {
+/** The ball waits on a drafting pin: a crosshair and a pulse that says "this is where it starts". */
+function drawLaunchPad(ctx: CanvasRenderingContext2D, input: DrawWorld, x: number, y: number, r: number): void {
+  const cam = input.camera;
   ctx.save();
   ctx.translate(x, y);
-  ctx.save();
-  ctx.translate(0.04, -0.09);
-  ctx.scale(1.2, 0.36);
+  if (!input.highContrast) {
+    const beat = input.reducedMotion ? 0.5 : (input.time * 0.8) % 1;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * (1.3 + beat * 1.2), 0, TAU);
+    ctx.strokeStyle = `rgba(234, 88, 12, ${0.5 * (1 - beat)})`;
+    ctx.lineWidth = px(cam, 1.6);
+    ctx.stroke();
+    const halo = ctx.createRadialGradient(0, 0, r * 0.8, 0, 0, r * 2.2);
+    halo.addColorStop(0, 'rgba(234, 88, 12, 0.16)');
+    halo.addColorStop(1, 'rgba(234, 88, 12, 0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * 2.2, 0, TAU);
+    ctx.fill();
+  }
+  const spin = input.reducedMotion ? 0 : input.time * 0.6;
+  ctx.rotate(spin);
+  ctx.strokeStyle = 'rgba(194, 65, 12, 0.7)';
+  ctx.lineWidth = px(cam, 1.4);
+  ctx.setLineDash([px(cam, 3), px(cam, 3)]);
   ctx.beginPath();
-  ctx.arc(0, 0, r, 0, TAU);
-  ctx.fillStyle = 'rgba(48, 24, 12, 0.22)';
+  ctx.arc(0, 0, r * 1.5, 0, TAU);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  for (let i = 0; i < 4; i += 1) {
+    const a = (i / 4) * TAU;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * r * 1.62, Math.sin(a) * r * 1.62);
+    ctx.lineTo(Math.cos(a) * r * 1.95, Math.sin(a) * r * 1.95);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawAfterimages(ctx: CanvasRenderingContext2D, path: Point[], r: number, speed: number, paint: BallPaint): void {
+  if (speed < 6 || path.length < 8) return;
+  const k = clamp01((speed - 6) / 10);
+  ctx.save();
+  for (let i = 1; i <= 3; i += 1) {
+    const point = path[path.length - 1 - i * 3];
+    if (!point) break;
+    ctx.globalAlpha = k * (0.22 - i * 0.05);
+    ctx.fillStyle = paint.body[1];
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, r * (1 - i * 0.08), 0, TAU);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawSpeedLines(ctx: CanvasRenderingContext2D, x: number, y: number, vx: number, vy: number, r: number, cam: Camera, time: number): void {
+  const speed = Math.hypot(vx, vy);
+  if (speed < 9) return;
+  const k = clamp01((speed - 9) / 9);
+  const ux = vx / speed;
+  const uy = vy / speed;
+  ctx.save();
+  ctx.lineWidth = px(cam, 1.6);
+  for (let i = -1; i <= 1; i += 1) {
+    const flick = 0.6 + 0.4 * Math.sin(time * 40 + i * 2);
+    const off = i * r * 0.7;
+    const ox = x - uy * off - ux * r * 1.2;
+    const oy = y + ux * off - uy * r * 1.2;
+    const len = r * (1.2 + k * 2.4) * flick * (i === 0 ? 1.3 : 1);
+    ctx.strokeStyle = `rgba(92, 58, 30, ${0.35 * k})`;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    ctx.lineTo(ox - ux * len, oy - uy * len);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+interface BallDraw {
+  x: number;
+  y: number;
+  r: number;
+  vx: number;
+  vy: number;
+  reduced: boolean;
+  spin: number;
+  squash: number;
+  nx: number;
+  ny: number;
+  paint: BallPaint;
+  letter: string | undefined;
+  /** 0 to 1: a warm halo that grows with speed. */
+  glow: number;
+  camera: Camera;
+}
+
+function drawBall(ctx: CanvasRenderingContext2D, ball: BallDraw): void {
+  const { r, paint } = ball;
+  ctx.save();
+  ctx.translate(ball.x, ball.y);
+  // Contact shadow: a tight dark core inside a soft penumbra.
+  ctx.save();
+  ctx.translate(SHADOW.x * 0.6, -r * 0.3 + SHADOW.y);
+  ctx.scale(1.25, 0.38);
+  const shade = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 1.1);
+  shade.addColorStop(0, 'rgba(48, 24, 12, 0.34)');
+  shade.addColorStop(1, 'rgba(48, 24, 12, 0)');
+  ctx.fillStyle = shade;
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 1.1, 0, TAU);
   ctx.fill();
   ctx.restore();
-  const speed = Math.hypot(vx, vy);
-  if (!reduced && squash !== 0) {
+
+  if (ball.glow > 0.01) {
+    const halo = ctx.createRadialGradient(0, 0, r * 0.8, 0, 0, r * (2 + ball.glow));
+    halo.addColorStop(0, hexAlpha(paint.band, 0.35 * ball.glow));
+    halo.addColorStop(1, hexAlpha(paint.band, 0));
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, 0, r * (2 + ball.glow), 0, TAU);
+    ctx.fill();
+  }
+
+  const speed = Math.hypot(ball.vx, ball.vy);
+  if (!ball.reduced && ball.squash !== 0) {
     // Squash along the contact normal, bulge across it. The spring-back overshoots once.
-    const angle = Math.atan2(ny, nx);
+    const angle = Math.atan2(ball.ny, ball.nx);
     ctx.rotate(angle);
-    ctx.scale(1 - squash, 1 + squash * 0.65);
+    ctx.scale(1 - ball.squash, 1 + ball.squash * 0.65);
     ctx.rotate(-angle);
-  } else if (!reduced && speed > 1) {
-    const angle = Math.atan2(vy, vx);
-    const stretch = Math.min(0.14, speed / 26);
+  } else if (!ball.reduced && speed > 1) {
+    const angle = Math.atan2(ball.vy, ball.vx);
+    const stretch = Math.min(0.16, speed / 24);
     ctx.rotate(angle);
     ctx.scale(1 + stretch, 1 - stretch * 0.7);
     ctx.rotate(-angle);
   }
-  const body = ctx.createRadialGradient(-r * 0.32, r * 0.34, r * 0.08, 0.02, -0.02, r);
+  const body = ctx.createRadialGradient(-r * 0.32, r * 0.34, r * 0.06, 0.02, -0.02, r);
   body.addColorStop(0, paint.body[0]);
-  body.addColorStop(0.42, paint.body[1]);
+  body.addColorStop(0.45, paint.body[1]);
   body.addColorStop(1, paint.body[2]);
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, TAU);
   ctx.fillStyle = body;
   ctx.fill();
 
-  // A painted band that turns with the ball, so rolling reads at a glance.
+  // A painted band and a stud that turn with the ball, so rolling reads at a glance.
   ctx.save();
   ctx.beginPath();
-  ctx.arc(0, 0, r * 0.98, 0, TAU);
+  ctx.arc(0, 0, r * 0.985, 0, TAU);
   ctx.clip();
-  ctx.rotate(spin);
-  ctx.fillStyle = hexAlpha(paint.band, 0.92);
+  ctx.rotate(ball.spin);
+  ctx.fillStyle = hexAlpha(paint.band, 0.95);
   ctx.fillRect(-r, -r * 0.17, r * 2, r * 0.34);
-  ctx.fillStyle = 'rgba(255, 237, 213, 0.9)';
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.28)';
+  ctx.fillRect(-r, r * 0.1, r * 2, r * 0.05);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+  ctx.fillRect(-r, -r * 0.17, r * 2, r * 0.05);
+  ctx.fillStyle = 'rgba(255, 237, 213, 0.95)';
   ctx.beginPath();
   ctx.arc(r * 0.55, 0, r * 0.1, 0, TAU);
   ctx.fill();
+  ctx.fillStyle = hexAlpha(paint.band, 0.9);
+  ctx.beginPath();
+  ctx.arc(-r * 0.55, 0, r * 0.07, 0, TAU);
+  ctx.fill();
   ctx.restore();
 
-  const shade = ctx.createRadialGradient(-r * 0.3, r * 0.3, r * 0.2, 0, 0, r);
-  shade.addColorStop(0, 'rgba(255,255,255,0)');
-  shade.addColorStop(0.7, 'rgba(11,16,22,0.15)');
-  shade.addColorStop(1, 'rgba(11,16,22,0.6)');
+  const shadeIn = ctx.createRadialGradient(-r * 0.3, r * 0.3, r * 0.2, 0, 0, r);
+  shadeIn.addColorStop(0, 'rgba(255,255,255,0)');
+  shadeIn.addColorStop(0.7, 'rgba(11,16,22,0.15)');
+  shadeIn.addColorStop(1, 'rgba(11,16,22,0.62)');
   ctx.beginPath();
   ctx.arc(0, 0, r, 0, TAU);
-  ctx.fillStyle = shade;
+  ctx.fillStyle = shadeIn;
+  ctx.fill();
+
+  // Warm bounce light along the lower right rim, from the paper below.
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.9, -Math.PI * 0.62, -Math.PI * 0.02);
+  ctx.strokeStyle = 'rgba(255, 196, 140, 0.5)';
+  ctx.lineWidth = r * 0.1;
+  ctx.stroke();
+
+  // Glossy window reflection and a hard specular dot.
+  ctx.save();
+  ctx.translate(-r * 0.32, r * 0.38);
+  ctx.rotate(-0.6);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, r * 0.3, r * 0.15, 0, 0, TAU);
+  ctx.fillStyle = 'rgba(255, 250, 240, 0.55)';
+  ctx.fill();
+  ctx.restore();
+  ctx.beginPath();
+  ctx.arc(-r * 0.36, r * 0.4, r * 0.11, 0, TAU);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
   ctx.fill();
   ctx.beginPath();
-  ctx.arc(-r * 0.3, r * 0.34, r * 0.2, 0, TAU);
-  ctx.fillStyle = 'rgba(255, 248, 236, 0.92)';
+  ctx.arc(-r * 0.08, r * 0.58, r * 0.05, 0, TAU);
+  ctx.fillStyle = 'rgba(255, 248, 236, 0.7)';
   ctx.fill();
+  ctx.lineWidth = px(ball.camera, 1);
+  ctx.strokeStyle = 'rgba(11, 16, 22, 0.55)';
   ctx.beginPath();
-  ctx.arc(-r * 0.12, r * 0.52, r * 0.07, 0, TAU);
-  ctx.fillStyle = 'rgba(255, 248, 236, 0.6)';
-  ctx.fill();
-  if (letter) worldText(ctx, letter, r * 0.7, '#F4F1EA');
+  ctx.arc(0, 0, r, 0, TAU);
+  ctx.stroke();
+  if (ball.letter) worldText(ctx, ball.letter, r * 0.7, '#F4F1EA');
   ctx.restore();
 }
+
+/* ------------------------------------------------------------------ */
+/* The ring                                                            */
+/* ------------------------------------------------------------------ */
 
 function drawGoal(ctx: CanvasRenderingContext2D, input: DrawWorld, goal: Goal, met: boolean, selected: boolean): void {
   const color = met ? '#0F766E' : input.accent;
   const reduced = input.reducedMotion;
+  const t = reduced ? 0 : input.time;
+  const cam = input.camera;
   const breathe = reduced ? 0 : Math.sin(input.time * 2.4);
   let near = 0;
   if (input.mode === 'run' && input.sim && !met) {
@@ -465,63 +984,116 @@ function drawGoal(ctx: CanvasRenderingContext2D, input: DrawWorld, goal: Goal, m
       near = Math.max(near, clamp01(1 - d / 2.6));
     }
   }
+  const R = goal.r;
   ctx.save();
   ctx.translate(goal.x, goal.y);
   if (!input.highContrast) {
-    const reach = goal.r * (met ? 2.1 : 1.65 + near * 0.5);
-    const glow = ctx.createRadialGradient(0, 0, goal.r * 0.2, 0, 0, reach);
-    glow.addColorStop(0, met ? 'rgba(15,118,110,0.4)' : hexAlpha(input.accent, 0.3 + near * 0.25));
-    glow.addColorStop(1, hexAlpha(input.accent, 0));
+    const reach = R * (met ? 2.3 : 1.7 + near * 0.6);
+    const glow = ctx.createRadialGradient(0, 0, R * 0.2, 0, 0, reach);
+    glow.addColorStop(0, hexAlpha(color, met ? 0.45 : 0.3 + near * 0.25));
+    glow.addColorStop(1, hexAlpha(color, 0));
     ctx.fillStyle = glow;
     ctx.beginPath();
     ctx.arc(0, 0, reach, 0, TAU);
     ctx.fill();
     if (!reduced) {
-      const wave = (input.time * (0.32 + near * 0.8)) % 1;
-      ctx.globalAlpha = (1 - wave) * 0.55;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = px(input.camera, 1.5);
-      ctx.beginPath();
-      ctx.arc(0, 0, goal.r * (1.05 + wave * 0.45), 0, TAU);
-      ctx.stroke();
+      for (let i = 0; i < 2; i += 1) {
+        const wave = (input.time * (0.32 + near * 0.8) + i * 0.5) % 1;
+        ctx.globalAlpha = (1 - wave) * 0.5;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = px(cam, 1.5);
+        ctx.beginPath();
+        ctx.arc(0, 0, R * (1.05 + wave * 0.55), 0, TAU);
+        ctx.stroke();
+      }
       ctx.globalAlpha = 1;
     }
+    // A slow vortex inside the ring pulls the eye to its middle.
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, R * 0.97, 0, TAU);
+    ctx.clip();
+    const well = ctx.createRadialGradient(0, 0, 0, 0, 0, R);
+    well.addColorStop(0, hexAlpha(color, met ? 0.35 : 0.2));
+    well.addColorStop(1, hexAlpha(color, 0.04));
+    ctx.fillStyle = well;
+    ctx.fillRect(-R, -R, R * 2, R * 2);
+    ctx.rotate(-t * (0.8 + near * 3));
+    ctx.strokeStyle = hexAlpha(color, 0.16);
+    ctx.lineWidth = px(cam, 1.4);
+    for (let k = 0; k < 3; k += 1) {
+      ctx.beginPath();
+      for (let s = 0; s <= 20; s += 1) {
+        const f = s / 20;
+        const a = (k / 3) * TAU + f * 2.6;
+        const rr = R * (0.95 - f * 0.8);
+        if (s === 0) ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+        else ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
   }
   if (met) {
     ctx.beginPath();
-    ctx.arc(0, 0, goal.r, 0, TAU);
+    ctx.arc(0, 0, R, 0, TAU);
     ctx.fillStyle = 'rgba(15,118,110,0.16)';
     ctx.fill();
   }
 
   // Orbiting ticks tighten and speed up as a ball closes in.
   const spin = reduced ? 0 : input.time * (0.5 + near * 3.5);
-  const orbit = goal.r * (1.22 - near * 0.12);
+  const orbit = R * (1.24 - near * 0.12);
   ctx.save();
   ctx.rotate(spin);
   ctx.strokeStyle = color;
-  ctx.lineWidth = px(input.camera, 2.2);
+  ctx.lineWidth = px(cam, 2.4);
   for (let i = 0; i < 8; i += 1) {
     const a = (i / 8) * TAU;
     ctx.beginPath();
-    ctx.arc(0, 0, orbit, a, a + 0.22);
+    ctx.arc(0, 0, orbit, a, a + 0.24);
     ctx.stroke();
   }
   ctx.restore();
 
-  ctx.lineWidth = px(input.camera, input.highContrast ? 3 : 2.6);
+  if (!input.highContrast && !reduced) {
+    // Three sparks ride an outer orbit the other way.
+    for (let i = 0; i < 3; i += 1) {
+      const a = -input.time * (0.9 + near * 2) + (i / 3) * TAU;
+      const ox = Math.cos(a) * R * 1.45;
+      const oy = Math.sin(a) * R * 1.45;
+      const spark = ctx.createRadialGradient(ox, oy, 0, ox, oy, px(cam, 7));
+      spark.addColorStop(0, 'rgba(255, 250, 235, 0.95)');
+      spark.addColorStop(0.4, hexAlpha(color, 0.6));
+      spark.addColorStop(1, hexAlpha(color, 0));
+      ctx.fillStyle = spark;
+      ctx.beginPath();
+      ctx.arc(ox, oy, px(cam, 7), 0, TAU);
+      ctx.fill();
+    }
+  }
+
+  if (!input.highContrast) {
+    ctx.lineWidth = px(cam, 8);
+    ctx.strokeStyle = hexAlpha(color, 0.18);
+    ctx.beginPath();
+    ctx.arc(0, 0, R * (1 + breathe * 0.018), 0, TAU);
+    ctx.stroke();
+  }
+  ctx.lineWidth = px(cam, input.highContrast ? 3 : 2.8);
   ctx.strokeStyle = color;
   ctx.beginPath();
-  ctx.arc(0, 0, goal.r * (1 + breathe * 0.018), 0, TAU);
+  ctx.arc(0, 0, R * (1 + breathe * 0.018), 0, TAU);
   ctx.stroke();
   ctx.globalAlpha = 0.8;
+  ctx.lineWidth = px(cam, 1.6);
   ctx.beginPath();
-  ctx.arc(0, 0, goal.r * 0.62, 0, TAU);
+  ctx.arc(0, 0, R * 0.62, 0, TAU);
   ctx.stroke();
   ctx.globalAlpha = 1;
-  const d = Math.min(0.22, goal.r * 0.28) * (1 + breathe * 0.06 + near * 0.35);
+  const d = Math.min(0.22, R * 0.28) * (1 + breathe * 0.06 + near * 0.35);
   ctx.save();
-  if (!reduced) ctx.rotate(met ? input.time * 3 : 0);
+  if (!reduced) ctx.rotate(met ? input.time * 3 : Math.sin(input.time * 1.3) * 0.2);
   ctx.beginPath();
   ctx.moveTo(0, d);
   ctx.lineTo(d * 0.72, 0);
@@ -530,40 +1102,66 @@ function drawGoal(ctx: CanvasRenderingContext2D, input: DrawWorld, goal: Goal, m
   ctx.closePath();
   ctx.fillStyle = color;
   ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(0, d);
+  ctx.lineTo(d * 0.72, 0);
+  ctx.lineTo(0, 0);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.fill();
   ctx.restore();
-  if (goal.ballId) worldText(ctx, goal.ballId.toUpperCase(), Math.min(0.28, goal.r * 0.4), color);
+  if (goal.ballId) worldText(ctx, goal.ballId.toUpperCase(), Math.min(0.28, R * 0.4), color);
   if (selected) {
     ctx.beginPath();
-    ctx.arc(0, 0, goal.r + 0.12, 0, TAU);
+    ctx.arc(0, 0, R + 0.12, 0, TAU);
     ctx.strokeStyle = '#1B2430';
-    ctx.lineWidth = px(input.camera, 1.5);
+    ctx.lineWidth = px(cam, 1.5);
     ctx.stroke();
   }
   ctx.restore();
 }
 
-function drawHover(
-  ctx: CanvasRenderingContext2D,
-  input: DrawWorld,
-  hover: Piece,
-  latched: readonly string[],
-  broken: readonly string[],
-  anim: number,
-  all: Piece[],
-): void {
+/* ------------------------------------------------------------------ */
+/* Placement feedback                                                  */
+/* ------------------------------------------------------------------ */
+
+function drawHover(pen: Pen, input: DrawWorld, hover: Piece, latched: readonly string[], broken: readonly string[], all: Piece[]): void {
+  const { ctx } = pen;
+  const cam = input.camera;
+  const pose = piecePose(hover, input.sim?.t ?? 0, latched, broken);
+  // Drafting crosshair from the piece to the sheet edges.
+  if (!input.highContrast) {
+    const { view } = input.level;
+    ctx.save();
+    ctx.strokeStyle = input.hoverOk ? 'rgba(29, 78, 216, 0.28)' : 'rgba(159, 18, 57, 0.28)';
+    ctx.lineWidth = px(cam, 1);
+    ctx.setLineDash([px(cam, 4), px(cam, 4)]);
+    ctx.beginPath();
+    ctx.moveTo(view.x, pose.y);
+    ctx.lineTo(view.x + view.w, pose.y);
+    ctx.moveTo(pose.x, view.y);
+    ctx.lineTo(pose.x, view.y + view.h);
+    ctx.stroke();
+    ctx.restore();
+  }
   const pulse = input.reducedMotion ? 0 : Math.sin(input.time * 6) * 0.08;
   ctx.save();
-  ctx.globalAlpha = input.hoverOk ? 0.55 + pulse : 0.2;
-  drawPiece(ctx, input, hover, true, latched, broken, anim, all);
+  ctx.globalAlpha = input.hoverOk ? 0.6 + pulse : 0.22;
+  drawPiece(pen, input, hover, true, latched, broken, all);
   ctx.restore();
-  const pose = piecePose(hover, input.sim?.t ?? 0, latched, broken);
   ctx.save();
   ctx.translate(pose.x, pose.y);
   ctx.rotate(pose.rot);
-  ctx.lineWidth = px(input.camera, 1.6);
-  ctx.setLineDash([px(input.camera, 5), px(input.camera, 4)]);
+  if (input.hoverOk && !input.highContrast) {
+    ctx.fillStyle = 'rgba(29, 78, 216, 0.06)';
+    ctx.beginPath();
+    ctx.roundRect(-hover.w / 2 - 0.06, -hover.h / 2 - 0.06, hover.w + 0.12, hover.h + 0.12, 0.08);
+    ctx.fill();
+  }
+  ctx.lineWidth = px(cam, 1.6);
+  ctx.setLineDash([px(cam, 5), px(cam, 4)]);
   ctx.lineDashOffset = input.reducedMotion ? 0 : -input.time * 0.4;
-  ctx.strokeStyle = input.hoverOk ? 'rgba(15,118,110,0.8)' : '#9F1239';
+  ctx.strokeStyle = input.hoverOk ? 'rgba(15,118,110,0.85)' : '#9F1239';
   ctx.beginPath();
   ctx.roundRect(-hover.w / 2 - 0.06, -hover.h / 2 - 0.06, hover.w + 0.12, hover.h + 0.12, 0.08);
   ctx.stroke();
@@ -575,47 +1173,50 @@ function drawHover(
     ctx.lineTo(s, s);
     ctx.moveTo(s, -s);
     ctx.lineTo(-s, s);
-    ctx.lineWidth = px(input.camera, 2.4);
+    ctx.lineWidth = px(cam, 2.4);
     ctx.stroke();
   }
   ctx.restore();
 }
 
-function drawSelection(
-  ctx: CanvasRenderingContext2D,
-  input: DrawWorld,
-  piece: Piece,
-  latched: readonly string[],
-  broken: readonly string[],
-): void {
+function drawSelection(ctx: CanvasRenderingContext2D, input: DrawWorld, piece: Piece, latched: readonly string[], broken: readonly string[]): void {
   const pose = piecePose(piece, input.sim?.t ?? 0, latched, broken);
   const pad = 0.1;
   const w = piece.w + pad * 2;
   const h = piece.h + pad * 2;
+  const cam = input.camera;
   ctx.save();
   ctx.translate(pose.x, pose.y);
   ctx.rotate(pose.rot);
-  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-  ctx.lineWidth = px(input.camera, 3.4);
+  if (!input.highContrast) {
+    ctx.fillStyle = 'rgba(234, 88, 12, 0.07)';
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+  ctx.lineWidth = px(cam, 3.6);
   ctx.strokeRect(-w / 2, -h / 2, w, h);
   ctx.strokeStyle = '#1B2430';
-  ctx.lineWidth = px(input.camera, 1.6);
-  ctx.setLineDash([px(input.camera, 6), px(input.camera, 4)]);
+  ctx.lineWidth = px(cam, 1.6);
+  ctx.setLineDash([px(cam, 6), px(cam, 4)]);
   ctx.lineDashOffset = input.reducedMotion ? 0 : -input.time * 0.5;
   ctx.strokeRect(-w / 2, -h / 2, w, h);
   ctx.setLineDash([]);
-  const dot = px(input.camera, 4.2);
+  const dot = px(cam, 4.4);
   for (const [cx, cy] of [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]] as const) {
     ctx.beginPath();
     ctx.arc(cx, cy, dot, 0, TAU);
     ctx.fillStyle = '#FFFFFF';
     ctx.fill();
-    ctx.lineWidth = px(input.camera, 1.6);
+    ctx.lineWidth = px(cam, 1.8);
     ctx.strokeStyle = '#EA580C';
     ctx.stroke();
   }
   ctx.restore();
 }
+
+/* ------------------------------------------------------------------ */
+/* Particles and screen effects                                        */
+/* ------------------------------------------------------------------ */
 
 function drawParticles(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const camera = input.camera;
@@ -631,19 +1232,35 @@ function drawParticles(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
       ctx.beginPath();
       ctx.arc(p.x, p.y, Math.max(0.01, r), 0, TAU);
       ctx.stroke();
+      ctx.globalAlpha = a * 0.25;
+      ctx.lineWidth = px(camera, 4 + a * 8);
+      ctx.stroke();
     } else if (p.kind === 'spark') {
-      ctx.globalAlpha = a;
       ctx.strokeStyle = p.color;
-      ctx.lineWidth = px(camera, 2.4) * (0.4 + a);
+      ctx.globalAlpha = a * 0.3;
+      ctx.lineWidth = px(camera, 6) * (0.4 + a);
       ctx.beginPath();
       ctx.moveTo(p.x, p.y);
-      ctx.lineTo(p.x - p.vx * 0.045, p.y - p.vy * 0.045);
+      ctx.lineTo(p.x - p.vx * 0.05, p.y - p.vy * 0.05);
+      ctx.stroke();
+      ctx.globalAlpha = a;
+      ctx.lineWidth = px(camera, 2.2) * (0.4 + a);
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(255, 250, 235, 0.9)';
+      ctx.lineWidth = px(camera, 1) * (0.4 + a);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - p.vx * 0.02, p.y - p.vy * 0.02);
       ctx.stroke();
     } else if (p.kind === 'puff') {
       ctx.globalAlpha = a;
-      ctx.fillStyle = p.color;
+      const r = p.size * (1 + (1 - a) * 1.6);
+      const soft = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+      soft.addColorStop(0, p.color);
+      soft.addColorStop(1, 'rgba(120, 88, 56, 0)');
+      ctx.fillStyle = soft;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, p.size * (1 + (1 - a) * 1.6), 0, TAU);
+      ctx.arc(p.x, p.y, r, 0, TAU);
       ctx.fill();
     } else if (p.kind === 'shard') {
       ctx.globalAlpha = Math.min(1, a * 1.6);
@@ -656,16 +1273,56 @@ function drawParticles(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
       ctx.lineTo(-p.size * 0.7, -p.size * 0.4);
       ctx.closePath();
       ctx.fill();
-      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.8)';
       ctx.lineWidth = px(camera, 1);
       ctx.stroke();
+      // A glint that flashes as the shard turns.
+      const glint = Math.max(0, Math.sin(p.rot * 2));
+      if (glint > 0.85) {
+        ctx.fillStyle = `rgba(255,255,255,${(glint - 0.85) * 6})`;
+        ctx.fill();
+      }
     } else if (p.kind === 'confetti') {
       ctx.globalAlpha = Math.min(1, a * 2);
       ctx.translate(p.x, p.y);
       ctx.rotate(p.rot);
-      ctx.scale(Math.cos(p.rot * 2.3), 1);
+      const flip = Math.cos(p.rot * 2.3);
+      ctx.scale(flip, 1);
       ctx.fillStyle = p.color;
       ctx.fillRect(-p.size, -p.size * 0.5, p.size * 2, p.size);
+      if (flip > 0.6) {
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
+        ctx.fillRect(-p.size, -p.size * 0.5, p.size * 2, p.size * 0.35);
+      }
+    } else if (p.kind === 'star') {
+      const twinkle = 0.7 + 0.3 * Math.sin(p.life * 30);
+      ctx.globalAlpha = Math.min(1, a * 1.8);
+      ctx.translate(p.x, p.y);
+      ctx.rotate(p.rot);
+      const s = p.size * (0.6 + a * 0.6) * twinkle;
+      const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, s * 2.2);
+      halo.addColorStop(0, 'rgba(255, 236, 170, 0.6)');
+      halo.addColorStop(1, 'rgba(255, 236, 170, 0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(0, 0, s * 2.2, 0, TAU);
+      ctx.fill();
+      ctx.fillStyle = p.color;
+      starPath(ctx, s);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(146, 64, 14, 0.55)';
+      ctx.lineWidth = px(camera, 0.8);
+      ctx.stroke();
+    } else if (p.kind === 'ember') {
+      const r = p.size * (1 + (1 - a) * 0.8);
+      const glow = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3);
+      glow.addColorStop(0, hexAlpha(p.color, 0.9 * a));
+      glow.addColorStop(0.3, hexAlpha(p.color, 0.4 * a));
+      glow.addColorStop(1, hexAlpha(p.color, 0));
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, r * 3, 0, TAU);
+      ctx.fill();
     } else {
       ctx.fillStyle = p.color;
       ctx.globalAlpha = a * 0.28;
@@ -681,6 +1338,64 @@ function drawParticles(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   }
 }
 
+function starPath(ctx: CanvasRenderingContext2D, s: number): void {
+  ctx.beginPath();
+  for (let i = 0; i < 8; i += 1) {
+    const a = (i / 8) * TAU;
+    const r = i % 2 === 0 ? s : s * 0.34;
+    if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  ctx.closePath();
+}
+
+/** A slow sunburst behind the ring once it is solved, and a shockwave that rolls out from it. */
+function drawRays(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
+  const rays = input.fx.rays;
+  if (!rays || input.reducedMotion || input.highContrast) return;
+  const { width, height, dpr } = input;
+  const c = worldToScreen(input.camera, width, height, rays.x, rays.y);
+  const age = rays.age;
+  const fade = clamp01(age / 0.35) * clamp01((3.2 - age) / 1.2);
+  const far = Math.hypot(width, height);
+  ctx.save();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.globalCompositeOperation = 'screen';
+  const burst = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, far * 0.6);
+  burst.addColorStop(0, `rgba(255, 226, 160, ${0.55 * fade})`);
+  burst.addColorStop(0.3, `rgba(255, 190, 110, ${0.22 * fade})`);
+  burst.addColorStop(1, 'rgba(255, 190, 110, 0)');
+  ctx.fillStyle = burst;
+  ctx.beginPath();
+  const count = 14;
+  const turn = age * 0.25;
+  for (let i = 0; i < count; i += 1) {
+    const a = turn + (i / count) * TAU;
+    const spread = (TAU / count) * 0.32;
+    ctx.moveTo(c.x, c.y);
+    ctx.lineTo(c.x + Math.cos(a - spread) * far, c.y + Math.sin(a - spread) * far);
+    ctx.lineTo(c.x + Math.cos(a + spread) * far, c.y + Math.sin(a + spread) * far);
+    ctx.closePath();
+  }
+  ctx.fill();
+  const glow = ctx.createRadialGradient(c.x, c.y, 0, c.x, c.y, 160);
+  glow.addColorStop(0, `rgba(255, 244, 214, ${0.6 * fade})`);
+  glow.addColorStop(1, 'rgba(255, 244, 214, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(c.x - 160, c.y - 160, 320, 320);
+  ctx.globalCompositeOperation = 'source-over';
+  const k = clamp01(age / 0.9);
+  if (k < 1) {
+    const eased = 1 - Math.pow(1 - k, 3);
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, eased * far * 0.55, 0, TAU);
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.7 * (1 - k)})`;
+    ctx.lineWidth = 2 + 10 * (1 - k);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 /** Screen-space color wash for the moment of a win or a loss. */
 function drawFlash(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const flash = input.fx.flash;
@@ -691,13 +1406,13 @@ function drawFlash(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const edge = ctx.createRadialGradient(width / 2, height / 2, Math.min(width, height) * 0.25, width / 2, height / 2, Math.max(width, height) * 0.75);
   edge.addColorStop(0, `rgba(${flash.color}, ${0.06 * a})`);
-  edge.addColorStop(1, `rgba(${flash.color}, ${0.42 * a})`);
+  edge.addColorStop(1, `rgba(${flash.color}, ${0.45 * a})`);
   ctx.fillStyle = edge;
   ctx.fillRect(0, 0, width, height);
   ctx.restore();
 }
 
-/** Opening iris from the ball, the classic level-start wipe. */
+/** Opening iris from the ball, the classic level-start wipe, trimmed like a lens. */
 function drawIris(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const iris = input.fx.iris;
   if (iris >= 1 || input.reducedMotion) return;
@@ -709,35 +1424,118 @@ function drawIris(ctx: CanvasRenderingContext2D, input: DrawWorld): void {
   const far = Math.hypot(Math.max(center.x, width - center.x), Math.max(center.y, height - center.y));
   const k = iris < 0.18 ? 0 : (iris - 0.18) / 0.82;
   const eased = k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2;
-  const hold = 26 * clamp01(iris / 0.18);
-  const r = hold + eased * far;
+  const hold = 30 * clamp01(iris / 0.18);
+  const r = Math.max(0, hold + eased * far);
   ctx.save();
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.beginPath();
   ctx.rect(0, 0, width, height);
-  ctx.arc(center.x, center.y, Math.max(0, r), 0, TAU, true);
-  ctx.fillStyle = '#1B2430';
+  ctx.arc(center.x, center.y, r, 0, TAU, true);
+  const dark = ctx.createRadialGradient(center.x, center.y, r, center.x, center.y, r + far);
+  dark.addColorStop(0, '#243140');
+  dark.addColorStop(1, '#0B1016');
+  ctx.fillStyle = dark;
   ctx.fill('evenodd');
   ctx.beginPath();
-  ctx.arc(center.x, center.y, Math.max(0, r), 0, TAU);
+  ctx.arc(center.x, center.y, r, 0, TAU);
   ctx.strokeStyle = input.accent;
   ctx.lineWidth = 4;
   ctx.stroke();
+  // Lens ticks spin around the opening edge.
+  ctx.translate(center.x, center.y);
+  ctx.rotate(iris * 2.4);
+  ctx.strokeStyle = 'rgba(255, 237, 213, 0.55)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 24; i += 1) {
+    const a = (i / 24) * TAU;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * (r + 10), Math.sin(a) * (r + 10));
+    ctx.lineTo(Math.cos(a) * (r + (i % 2 ? 16 : 22)), Math.sin(a) * (r + (i % 2 ? 16 : 22)));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* ------------------------------------------------------------------ */
+/* Pieces                                                              */
+/* ------------------------------------------------------------------ */
+
+/** Things that sit under a piece rather than on it, such as a mover's rail or a spinner's sweep. */
+function drawUnderlay(pen: Pen, input: DrawWorld, piece: Piece): void {
+  if (piece.kind !== 'mover' && piece.kind !== 'spinner') return;
+  const { ctx } = pen;
+  const cam = input.camera;
+  ctx.save();
+  ctx.translate(piece.x, piece.y);
+  ctx.rotate(piece.rot);
+  if (piece.kind === 'mover') {
+    const half = (piece.props.distance ?? 2) / 2 + piece.w / 2;
+    ctx.strokeStyle = 'rgba(92, 58, 30, 0.35)';
+    ctx.lineWidth = px(cam, 3);
+    ctx.beginPath();
+    ctx.moveTo(-half, 0);
+    ctx.lineTo(half, 0);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(92, 58, 30, 0.5)';
+    ctx.lineWidth = px(cam, 1.2);
+    ctx.setLineDash([px(cam, 4), px(cam, 4)]);
+    ctx.beginPath();
+    ctx.moveTo(-half, -piece.h * 0.9);
+    ctx.lineTo(half, -piece.h * 0.9);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    for (const end of [-1, 1]) {
+      ctx.beginPath();
+      ctx.arc(end * half, 0, 0.06, 0, TAU);
+      ctx.fillStyle = '#5C3A1E';
+      ctx.fill();
+    }
+  } else {
+    const reach = piece.w / 2;
+    ctx.strokeStyle = 'rgba(92, 58, 30, 0.14)';
+    ctx.lineWidth = px(cam, 1.2);
+    ctx.setLineDash([px(cam, 3), px(cam, 5)]);
+    ctx.beginPath();
+    ctx.arc(0, 0, reach, 0, TAU);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+}
+
+const NO_SHADOW = new Set(['gravity', 'accelerator', 'portal']);
+
+/** Every piece casts its shadow before any piece is drawn, so shadows never land on top of a neighbor. */
+function drawShadow(ctx: CanvasRenderingContext2D, input: DrawWorld, piece: Piece, latched: readonly string[], broken: readonly string[]): void {
+  if (NO_SHADOW.has(piece.kind)) return;
+  const pose = piecePose(piece, input.sim?.t ?? 0, latched, broken);
+  if (pose.inactive) return;
+  const spawn = input.reducedMotion ? undefined : input.fx.spawns.get(piece.uid);
+  const lift = spawn !== undefined && spawn < 0.5 ? 1 + (1 - spawn / 0.5) * 1.5 : 1;
+  const h = piece.kind === 'switch' ? piece.h * 0.45 : piece.h;
+  ctx.save();
+  ctx.translate(pose.x + SHADOW.x * lift, pose.y + SHADOW.y * lift);
+  ctx.rotate(pose.rot);
+  for (const [grow, alpha] of [[0.07, 0.06], [0.035, 0.08], [0, 0.12]] as const) {
+    ctx.fillStyle = `rgba(48, 24, 12, ${alpha / Math.sqrt(lift)})`;
+    ctx.beginPath();
+    ctx.roundRect(-piece.w / 2 - grow, -h / 2 - grow, piece.w + grow * 2, h + grow * 2, 0.08 + grow);
+    ctx.fill();
+  }
   ctx.restore();
 }
 
 function drawPiece(
-  ctx: CanvasRenderingContext2D,
+  pen: Pen,
   input: DrawWorld,
   piece: Piece,
   owned: boolean,
   latched: readonly string[],
   broken: readonly string[],
-  anim: number,
   all: Piece[],
 ): void {
+  const { ctx } = pen;
   const pose = piecePose(piece, input.sim?.t ?? 0, latched, broken);
-  const ink = input.highContrast ? 2.4 : 1.6;
   const spawn = input.reducedMotion ? undefined : input.fx.spawns.get(piece.uid);
   const pulse = input.reducedMotion ? -1 : (input.fx.pulses.get(piece.uid) ?? -1);
   ctx.save();
@@ -747,14 +1545,14 @@ function drawPiece(
     const s = backOut(spawn / 0.5);
     ctx.scale(Math.max(0.01, s), Math.max(0.01, 0.6 + s * 0.4));
   }
-  ctx.lineWidth = px(input.camera, ink);
+  ctx.lineWidth = pen.ink;
   if (pose.inactive && piece.kind === 'breakable') {
     drawShards(ctx, piece.w, piece.h);
     ctx.restore();
     return;
   }
   if (pose.inactive && piece.kind === 'door') {
-    drawOpenDoor(ctx, piece.h);
+    drawOpenDoor(pen, piece.w, piece.h);
     ctx.restore();
     return;
   }
@@ -763,14 +1561,18 @@ function drawPiece(
     ctx.translate(0, -k * 0.35);
     ctx.scale(1 + k * 0.08, 1 - k);
   }
-  if (piece.kind !== 'gravity' && piece.kind !== 'accelerator' && piece.kind !== 'portal' && piece.kind !== 'switch') {
-    shadow(ctx, piece.w, piece.h);
-  }
-  drawBody(ctx, piece, pose.inactive, latched.includes(piece.uid), anim, input.camera, all, pulse);
+  drawBody(pen, piece, pose.inactive, latched.includes(piece.uid), all, pulse);
   if (owned) {
-    ctx.fillStyle = '#EA580C';
+    // A small orange pin marks the pieces the player placed.
+    const x = piece.w / 2 - 0.1;
+    const y = -piece.h / 2 + 0.06;
     ctx.beginPath();
-    ctx.arc(piece.w / 2 - 0.1, -piece.h / 2 + 0.06, 0.05, 0, TAU);
+    ctx.arc(x, y, 0.055, 0, TAU);
+    ctx.fillStyle = '#EA580C';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(x - 0.015, y + 0.015, 0.02, 0, TAU);
+    ctx.fillStyle = 'rgba(255, 237, 213, 0.9)';
     ctx.fill();
   }
   if (spawn !== undefined && spawn < 0.3) {
@@ -785,97 +1587,100 @@ function drawPiece(
 
 const THUMP = new Set(['platform', 'ramp', 'wall', 'breakable', 'oneway', 'door', 'mover', 'conveyor']);
 
-function drawBody(
-  ctx: CanvasRenderingContext2D,
-  piece: Piece,
-  inactive: boolean,
-  latched: boolean,
-  anim: number,
-  camera: Camera,
-  all: Piece[],
-  pulse: number,
-): void {
+function drawBody(pen: Pen, piece: Piece, inactive: boolean, latched: boolean, all: Piece[], pulse: number): void {
+  const { ctx, camera, t } = pen;
   const { w, h, kind } = piece;
   const hit = pulse >= 0 ? Math.exp(-pulse * 6) : 0;
   if (kind === 'wall') {
-    plank(ctx, w, h, '#D5DEE6', '#6E8498', '#243140', 0.06);
-    ctx.strokeStyle = 'rgba(36,49,64,0.25)';
-    ctx.lineWidth = px(camera, 1);
-    ctx.beginPath();
-    for (let y = -h / 2 + 0.3; y < h / 2 - 0.1; y += 0.3) {
-      ctx.moveTo(-w * 0.3, y);
-      ctx.lineTo(w * 0.3, y);
-    }
-    ctx.stroke();
+    slab(pen, w, h, STEEL, 0.06);
+    brushed(pen, w, h);
+    rivets(pen, w, h);
+    hitFlash(pen, w, h, hit, 0.06);
     return;
   }
   if (kind === 'platform' || kind === 'ramp' || kind === 'mover' || kind === 'spinner') {
-    plank(ctx, w, h, '#F0D7A8', '#C8883A', '#5C3A1E', 0.07);
-    woodGrain(ctx, w, h, camera, piece.uid);
+    slab(pen, w, h, WOOD, 0.07);
+    woodGrain(pen, w, h, piece.uid);
+    if (kind !== 'spinner' && w > 0.9 && h >= 0.16) {
+      nail(pen, -w / 2 + 0.16, 0, Math.min(0.045, h * 0.2));
+      nail(pen, w / 2 - 0.16, 0, Math.min(0.045, h * 0.2));
+    }
     if (kind === 'mover') {
       arrowHead(ctx, w * 0.3, 0, Math.min(0.14, h * 0.6), '#5C3A1E');
       arrowHead(ctx, -w * 0.3, 0, -Math.min(0.14, h * 0.6), '#5C3A1E');
     }
     if (kind === 'spinner') {
+      const hub = Math.min(w, h) * 0.42;
+      const cap = ctx.createRadialGradient(-hub * 0.3, hub * 0.3, 0, 0, 0, hub);
+      cap.addColorStop(0, '#C8A06A');
+      cap.addColorStop(1, '#4A2E16');
       ctx.beginPath();
-      ctx.arc(0, 0, Math.min(w, h) * 0.34, 0, TAU);
-      ctx.fillStyle = '#5C3A1E';
+      ctx.arc(0, 0, hub, 0, TAU);
+      ctx.fillStyle = cap;
       ctx.fill();
+      ctx.strokeStyle = '#3B2412';
+      ctx.stroke();
       ctx.beginPath();
-      ctx.arc(0, 0, Math.min(w, h) * 0.14, 0, TAU);
+      ctx.arc(0, 0, hub * 0.4, 0, TAU);
       ctx.fillStyle = '#F0D7A8';
       ctx.fill();
+      // Motion arcs trail the spinning ends.
+      if (t) {
+        ctx.strokeStyle = 'rgba(92,58,30,0.35)';
+        ctx.lineWidth = px(camera, 1.4);
+        const dir = Math.sign(piece.props.omega ?? 1) || 1;
+        for (const end of [-1, 1]) {
+          ctx.beginPath();
+          ctx.arc(0, 0, w / 2 - 0.04, end > 0 ? -dir * 0.5 : Math.PI - dir * 0.5, end > 0 ? 0 : Math.PI, dir > 0);
+          ctx.stroke();
+        }
+      }
     }
+    hitFlash(pen, w, h, hit, 0.07);
     return;
   }
   if (kind === 'oneway') {
-    plank(ctx, w, h, '#F0D7A8', '#C8883A', '#5C3A1E', 0.05);
-    const drift = anim ? ((anim * 0.6) % 1) * 0.06 : 0;
+    slab(pen, w, h, WOOD, 0.05);
+    woodGrain(pen, w, h, piece.uid);
+    const drift = t ? ((t * 0.6) % 1) * 0.06 : 0;
     ctx.save();
+    ctx.beginPath();
+    ctx.rect(-w / 2, -h / 2, w, h);
+    ctx.clip();
     ctx.translate(0, drift - 0.03);
-    chevrons(ctx, w * 0.55, 'y', 3, '#5C3A1E');
+    ctx.lineWidth = px(camera, 4);
+    chevrons(ctx, w * 0.6, 'y', 3, 'rgba(255, 244, 222, 0.6)');
+    ctx.lineWidth = px(camera, 1.8);
+    chevrons(ctx, w * 0.6, 'y', 3, '#5C3A1E');
     ctx.restore();
+    hitFlash(pen, w, h, hit, 0.05);
     return;
   }
   if (kind === 'conveyor') {
-    plank(ctx, w, h, '#2C3540', '#1B2430', '#1B2430', 0.05);
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(-w / 2 + 0.06, -h / 2 + 0.05, w - 0.12, h - 0.1);
-    ctx.clip();
-    ctx.strokeStyle = '#F4F1EA';
-    ctx.lineWidth = px(camera, 2);
-    const offset = (anim * (piece.props.power ?? 4) * 0.25) % 0.36;
-    for (let x = -w / 2 + offset; x < w / 2; x += 0.36) {
-      ctx.beginPath();
-      ctx.moveTo(x, -h / 2);
-      ctx.lineTo(x + 0.12, h / 2);
-      ctx.stroke();
-    }
-    ctx.restore();
-    for (const end of [-1, 1]) {
-      ctx.beginPath();
-      ctx.arc((end * (w - h)) / 2, 0, h * 0.34, 0, TAU);
-      ctx.fillStyle = '#3B4652';
-      ctx.fill();
-      ctx.save();
-      ctx.translate((end * (w - h)) / 2, 0);
-      ctx.rotate(-anim * (piece.props.power ?? 4) * 1.2);
-      ctx.strokeStyle = '#F4F1EA';
-      ctx.lineWidth = px(camera, 1.4);
-      ctx.beginPath();
-      ctx.moveTo(-h * 0.26, 0);
-      ctx.lineTo(h * 0.26, 0);
-      ctx.stroke();
-      ctx.restore();
-    }
-    arrowHead(ctx, w * 0.38, 0, 0.12, '#EA580C');
+    drawConveyor(pen, piece);
     return;
   }
   if (kind === 'breakable') {
-    plank(ctx, w, h, '#E7F4F6', '#B7D4D8', '#1F6F78', 0.05);
-    ctx.fillStyle = 'rgba(255,255,255,0.55)';
-    ctx.fillRect(-w / 2 + 0.08, h / 2 - 0.08, w * 0.4, 0.035);
+    slab(pen, w, h, GLASS, 0.05);
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(-w / 2, -h / 2, w, h, 0.05);
+    ctx.clip();
+    // A glint sweeps across the pane every few seconds.
+    const sweep = t ? ((t * 0.35) % 2.2) - 0.6 : 0.2;
+    const gx = -w / 2 + sweep * w;
+    const glint = ctx.createLinearGradient(gx - 0.3, 0, gx + 0.3, 0);
+    glint.addColorStop(0, 'rgba(255,255,255,0)');
+    glint.addColorStop(0.5, 'rgba(255,255,255,0.75)');
+    glint.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = glint;
+    ctx.beginPath();
+    ctx.moveTo(gx - 0.25, -h / 2);
+    ctx.lineTo(gx + 0.05, -h / 2);
+    ctx.lineTo(gx + 0.25, h / 2);
+    ctx.lineTo(gx - 0.05, h / 2);
+    ctx.fill();
+    ctx.restore();
     ctx.strokeStyle = '#1F6F78';
     ctx.lineWidth = px(camera, 1.2);
     ctx.beginPath();
@@ -885,223 +1690,647 @@ function drawBody(
     ctx.lineTo(w * 0.22, -h * 0.28);
     ctx.moveTo(-w * 0.02, 0);
     ctx.lineTo(-w * 0.1, -h * 0.3);
+    ctx.moveTo(w * 0.08, h * 0.1);
+    ctx.lineTo(w * 0.14, h * 0.38);
     ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.lineWidth = px(camera, 0.8);
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.2 + 0.01, h * 0.3 + 0.01);
+    ctx.lineTo(-w * 0.02 + 0.01, 0.01);
+    ctx.stroke();
+    hitFlash(pen, w, h, hit, 0.05);
     return;
   }
   if (kind === 'bouncer') {
     const lift = hit * 0.08 * Math.cos(pulse * 30);
-    plank(ctx, w, h, '#2C3540', '#1B2430', '#1B2430', 0.08);
+    slab(pen, w, h, RUBBER, 0.08);
     if (hit > 0.02) {
-      const glow = ctx.createLinearGradient(0, h / 2, 0, h / 2 + 0.5 * hit);
-      glow.addColorStop(0, `rgba(251,146,60,${0.6 * hit})`);
+      const glow = ctx.createLinearGradient(0, h / 2, 0, h / 2 + 0.6 * hit);
+      glow.addColorStop(0, `rgba(251,146,60,${0.7 * hit})`);
       glow.addColorStop(1, 'rgba(251,146,60,0)');
       ctx.fillStyle = glow;
-      ctx.fillRect(-w / 2, h / 2, w, 0.5 * hit);
+      ctx.fillRect(-w / 2, h / 2, w, 0.6 * hit);
     }
-    ctx.fillStyle = hit > 0.3 ? '#FDBA74' : '#EA580C';
-    ctx.fillRect(-w / 2 + 0.08, h / 2 - 0.1 + lift, w - 0.16, 0.08 + hit * 0.04);
-    ctx.fillStyle = 'rgba(234,88,12,0.6)';
+    // The rubber pad: bright, domed, and it jumps when struck.
+    const padH = 0.09 + hit * 0.04;
+    const padY = h / 2 - 0.1 + lift;
+    const pad = ctx.createLinearGradient(0, padY + padH, 0, padY);
+    pad.addColorStop(0, hit > 0.3 ? '#FFE0B8' : '#FDBA74');
+    pad.addColorStop(1, hit > 0.3 ? '#FB923C' : '#C2410C');
+    ctx.fillStyle = pad;
+    ctx.beginPath();
+    ctx.roundRect(-w / 2 + 0.07, padY, w - 0.14, padH, padH / 2);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillRect(-w / 2 + 0.14, padY + padH * 0.6, w - 0.28, padH * 0.2);
     for (let x = -w / 2 + 0.25; x < w / 2 - 0.1; x += 0.3) {
+      const on = t ? 0.45 + 0.35 * Math.sin(t * 4 - x * 3) : 0.6;
+      ctx.fillStyle = `rgba(251,146,60,${on + hit * 0.4})`;
       ctx.beginPath();
-      ctx.arc(x, -h * 0.1, 0.03, 0, TAU);
+      ctx.arc(x, -h * 0.12, 0.032, 0, TAU);
       ctx.fill();
     }
     return;
   }
   if (kind === 'spring') {
-    const kick = pulse >= 0 ? Math.exp(-pulse * 7) * Math.sin(pulse * 28) * 0.28 : 0;
-    const idle = anim ? Math.sin(anim * 3) * 0.015 : 0;
-    const reach = w / 2 - 0.08 + kick + idle;
-    plank(ctx, 0.16, Math.min(h, 0.5), '#E7C7A2', '#C47A3A', '#5C3A1E', 0.04);
-    ctx.save();
-    ctx.translate(-w / 2 + 0.08, 0);
-    plank(ctx, 0.16, h * 0.9, '#E7C7A2', '#C47A3A', '#5C3A1E', 0.04);
-    ctx.restore();
-    ctx.strokeStyle = '#C45C12';
-    ctx.lineWidth = px(camera, 2.4);
-    ctx.beginPath();
-    const coils = 4;
-    const from = -w / 2 + 0.08;
-    for (let i = 0; i <= 40; i += 1) {
-      const t = i / 40;
-      const x = from + t * (reach - from);
-      const y = Math.sin(t * coils * TAU) * h * 0.3;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    ctx.save();
-    ctx.translate(reach, 0);
-    plank(ctx, 0.1, h * 0.9, '#FDBA74', '#EA580C', '#7C2D12', 0.03);
-    ctx.restore();
-    arrowHead(ctx, reach + 0.14, 0, 0.12, hit > 0.2 ? '#EA580C' : '#C45C12');
+    drawSpring(pen, piece, pulse, hit);
     return;
   }
   if (kind === 'cannon') {
-    const recoil = hit * 0.14;
-    ctx.save();
-    ctx.translate(-recoil, 0);
-    plank(ctx, w * 0.78, h * 0.7, '#D5DEE6', '#6E8498', '#243140', 0.08);
-    ctx.beginPath();
-    ctx.arc(w * 0.28, 0, h * 0.28, 0, TAU);
-    ctx.fillStyle = '#1B2430';
-    ctx.fill();
-    ctx.restore();
-    ctx.beginPath();
-    ctx.arc(-w * 0.18, -h * 0.34, h * 0.26, 0, TAU);
-    ctx.fillStyle = '#5C3A1E';
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(-w * 0.18, -h * 0.34, h * 0.1, 0, TAU);
-    ctx.fillStyle = '#C8883A';
-    ctx.fill();
-    if (hit > 0.05) {
-      const flare = ctx.createRadialGradient(w / 2, 0, 0, w / 2, 0, 0.5 * hit + 0.1);
-      flare.addColorStop(0, `rgba(255,237,213,${hit})`);
-      flare.addColorStop(0.5, `rgba(251,146,60,${0.7 * hit})`);
-      flare.addColorStop(1, 'rgba(251,146,60,0)');
-      ctx.fillStyle = flare;
-      ctx.beginPath();
-      ctx.arc(w / 2, 0, 0.5 * hit + 0.1, 0, TAU);
-      ctx.fill();
-    }
-    arrowHead(ctx, w / 2, 0, 0.16, '#EA580C');
+    drawCannon(pen, piece, hit);
     return;
   }
   if (kind === 'accelerator') {
-    field(ctx, w, h, 'rgba(234,88,12,0.14)', '#EA580C');
+    field(pen, w, h, '234, 88, 12', 0.14 + hit * 0.2);
     ctx.save();
     ctx.beginPath();
-    ctx.rect(-w / 2, -h / 2, w, h);
+    ctx.roundRect(-w / 2, -h / 2, w, h, 0.12);
     ctx.clip();
-    const flow = anim ? ((anim * 0.9) % 1) * (w / 3) : 0;
+    // Streaks race along the field.
+    if (t) {
+      ctx.lineWidth = px(camera, 1.6);
+      for (let i = 0; i < 7; i += 1) {
+        const f = (t * (0.9 + hash01(i, 3) * 0.6) + hash01(i, 5)) % 1;
+        const x = -w / 2 + f * (w + 0.6) - 0.3;
+        const y = (hash01(i, 9) - 0.5) * h * 0.8;
+        ctx.strokeStyle = `rgba(251, 146, 60, ${Math.sin(f * Math.PI) * 0.7})`;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x - 0.35, y);
+        ctx.stroke();
+      }
+    }
+    const flow = t ? ((t * 0.9) % 1) * (w / 3) : 0;
     ctx.translate(flow - w / 6, 0);
+    ctx.lineWidth = px(camera, 5);
+    chevrons(ctx, w * 0.9, 'x', 4, 'rgba(255, 237, 213, 0.6)');
+    ctx.lineWidth = px(camera, 2.2);
     chevrons(ctx, w * 0.9, 'x', 4, '#C2410C');
     ctx.restore();
-    if (hit > 0.05) {
-      ctx.fillStyle = `rgba(251,146,60,${0.25 * hit})`;
-      ctx.fillRect(-w / 2, -h / 2, w, h);
-    }
     return;
   }
   if (kind === 'gravity') {
-    field(ctx, w, h, 'rgba(109,40,217,0.1)', '#6D28D9');
-    arrowHead(ctx, w * 0.28, 0, Math.min(0.28, h * 0.18), '#6D28D9');
-    ctx.fillStyle = '#6D28D9';
-    for (let i = 0; i < 6; i += 1) {
-      const t = (anim * 0.35 + i / 6) % 1;
-      ctx.globalAlpha = Math.sin(t * Math.PI) * 0.9;
+    field(pen, w, h, '109, 40, 217', 0.1 + hit * 0.15);
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(-w / 2, -h / 2, w, h, 0.12);
+    ctx.clip();
+    // Pressure bands roll along the pull.
+    ctx.strokeStyle = 'rgba(109, 40, 217, 0.18)';
+    ctx.lineWidth = px(camera, 2);
+    for (let i = 0; i < 4; i += 1) {
+      const f = ((t * 0.25) + i / 4) % 1;
+      const x = -w / 2 + f * w;
+      ctx.globalAlpha = Math.sin(f * Math.PI);
       ctx.beginPath();
-      ctx.arc(-w * 0.38 + t * w * 0.76, (((i * 37) % 7) / 7 - 0.5) * h * 0.7, 0.05, 0, TAU);
-      ctx.fill();
+      ctx.moveTo(x - 0.25, -h / 2);
+      ctx.quadraticCurveTo(x + 0.15, 0, x - 0.25, h / 2);
+      ctx.stroke();
     }
     ctx.globalAlpha = 1;
+    for (let i = 0; i < 9; i += 1) {
+      const f = (t * 0.35 + i / 9) % 1;
+      const y = (hash01(i, 41) - 0.5) * h * 0.8;
+      const x = -w * 0.42 + f * w * 0.84;
+      const a = Math.sin(f * Math.PI) * 0.9;
+      const mote = ctx.createRadialGradient(x, y, 0, x, y, 0.1);
+      mote.addColorStop(0, `rgba(139, 92, 246, ${a})`);
+      mote.addColorStop(1, 'rgba(139, 92, 246, 0)');
+      ctx.fillStyle = mote;
+      ctx.beginPath();
+      ctx.arc(x, y, 0.1, 0, TAU);
+      ctx.fill();
+    }
+    ctx.restore();
+    const size = Math.min(0.3, h * 0.2);
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    arrowHead(ctx, w * 0.28, 0, size * 1.5, '#A78BFA');
+    ctx.restore();
+    arrowHead(ctx, w * 0.28, 0, size, '#6D28D9');
     return;
   }
   if (kind === 'portal') {
-    const color = linkColor(piece.props.link ?? piece.uid);
-    ctx.fillStyle = 'rgba(244,241,234,0.92)';
-    ctx.strokeStyle = color;
-    ctx.lineWidth = px(camera, 3 + hit * 3);
-    ctx.beginPath();
-    ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(w, h) * 0.4);
-    ctx.fill();
-    ctx.stroke();
-    ctx.save();
-    ctx.beginPath();
-    ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(w, h) * 0.4);
-    ctx.clip();
-    const swirl = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(w, h) * 0.6);
-    swirl.addColorStop(0, hexAlpha(color, 0.35 + hit * 0.4));
-    swirl.addColorStop(1, hexAlpha(color, 0.02));
-    ctx.fillStyle = swirl;
-    ctx.fillRect(-w / 2, -h / 2, w, h);
-    ctx.strokeStyle = hexAlpha(color, 0.55);
-    ctx.lineWidth = px(camera, 1.4);
-    for (let i = 0; i < 3; i += 1) {
-      const t = (anim * 0.5 + i / 3) % 1;
-      ctx.globalAlpha = 1 - t;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, Math.max(0.01, w * 0.45 * (1 - t)), Math.max(0.01, h * 0.45 * (1 - t)), 0, 0, TAU);
-      ctx.stroke();
-    }
-    ctx.restore();
-    const mark = portalRole(piece, all);
-    if (mark === 'a') {
-      ctx.fillStyle = color;
-      for (const y of [-0.18, 0, 0.18]) {
-        ctx.beginPath();
-        ctx.arc(0, y * h, 0.045, 0, TAU);
-        ctx.fill();
-      }
-    } else {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = px(camera, 2);
-      ctx.beginPath();
-      ctx.moveTo(-w * 0.2, -h * 0.28);
-      ctx.lineTo(w * 0.2, -h * 0.28);
-      ctx.moveTo(-w * 0.2, 0);
-      ctx.lineTo(w * 0.2, 0);
-      ctx.moveTo(-w * 0.2, h * 0.28);
-      ctx.lineTo(w * 0.2, h * 0.28);
-      ctx.stroke();
-    }
+    drawPortal(pen, piece, all, hit);
     return;
   }
   if (kind === 'switch') {
-    plank(ctx, w, h * 0.45, '#D5DEE6', '#7E93A6', '#243140', 0.06);
-    const on = latched || inactive;
-    if (hit > 0.05) {
-      ctx.beginPath();
-      ctx.arc(0, h * 0.12, h * (0.3 + (1 - hit) * 0.5), 0, TAU);
-      ctx.strokeStyle = `rgba(15,118,110,${hit})`;
-      ctx.lineWidth = px(camera, 2.5);
-      ctx.stroke();
-    }
-    ctx.beginPath();
-    ctx.arc(0, h * 0.12, on ? h * 0.16 : h * 0.24, 0, TAU);
-    ctx.fillStyle = on ? '#0F766E' : '#EA580C';
-    ctx.fill();
-    ctx.strokeStyle = '#1B2430';
-    ctx.stroke();
+    drawSwitch(pen, piece, latched || inactive, hit);
     return;
   }
   if (kind === 'door') {
-    plank(ctx, w, h, '#C9D4DE', '#8AA0B4', '#243140', 0.04);
+    slab(pen, w, h, STEEL, 0.04);
+    hazard(pen, w, h);
     ctx.strokeStyle = '#243140';
     ctx.lineWidth = px(camera, 1.2);
-    for (let y = -h * 0.3; y <= h * 0.3; y += h * 0.3) {
+    for (let y = -h * 0.2; y <= h * 0.2 + 0.001; y += h * 0.2) {
       ctx.beginPath();
-      ctx.moveTo(-w * 0.3, y);
-      ctx.lineTo(w * 0.3, y);
+      ctx.moveTo(-w * 0.28, y);
+      ctx.lineTo(w * 0.28, y);
       ctx.stroke();
     }
+    // A lamp that shows the door is still shut.
+    const lamp = ctx.createRadialGradient(0, 0, 0, 0, 0, 0.12);
+    lamp.addColorStop(0, 'rgba(252, 165, 165, 1)');
+    lamp.addColorStop(0.4, 'rgba(220, 38, 38, 0.8)');
+    lamp.addColorStop(1, 'rgba(220, 38, 38, 0)');
+    ctx.fillStyle = lamp;
+    ctx.beginPath();
+    ctx.arc(0, 0, 0.12, 0, TAU);
+    ctx.fill();
     return;
   }
-  plank(ctx, w, h, '#F0D7A8', '#C8883A', '#5C3A1E', 0.06);
+  slab(pen, w, h, WOOD, 0.06);
 }
 
-/** Three quiet grain lines, seeded by the piece so they never swim. */
-function woodGrain(ctx: CanvasRenderingContext2D, w: number, h: number, camera: Camera, seed: string): void {
+/** Beveled slab: a lit top lip, a shaded underside, soft side edges, and an ink outline. */
+function slab(pen: Pen, w: number, h: number, mat: Material, radius: number): void {
+  const { ctx } = pen;
+  const r = Math.min(radius, w / 2, h / 2);
+  const body = ctx.createLinearGradient(0, h / 2, 0, -h / 2);
+  body.addColorStop(0, mat.hi);
+  body.addColorStop(0.5, mat.mid);
+  body.addColorStop(1, mat.lo);
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h / 2, w, h, r);
+  ctx.fillStyle = body;
+  ctx.fill();
+  if (!pen.high) {
+    ctx.save();
+    ctx.clip();
+    const bev = Math.min(0.05, h * 0.22, w * 0.22);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillRect(-w / 2, h / 2 - bev * 0.7, w, bev * 0.7);
+    ctx.fillStyle = 'rgba(30,14,0,0.2)';
+    ctx.fillRect(-w / 2, -h / 2, w, bev);
+    ctx.fillStyle = 'rgba(255,255,255,0.22)';
+    ctx.fillRect(-w / 2, -h / 2, bev * 0.7, h);
+    ctx.fillStyle = 'rgba(30,14,0,0.14)';
+    ctx.fillRect(w / 2 - bev * 0.8, -h / 2, bev * 0.8, h);
+    ctx.restore();
+  }
+  ctx.lineWidth = pen.ink;
+  ctx.strokeStyle = mat.edge;
+  ctx.stroke();
+}
+
+/** A warm flash across a surface the moment the ball strikes it. */
+function hitFlash(pen: Pen, w: number, h: number, hit: number, radius: number): void {
+  if (hit < 0.05 || pen.high) return;
+  const { ctx } = pen;
+  ctx.save();
+  ctx.globalAlpha = hit * 0.45;
+  ctx.fillStyle = '#FFF4DE';
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(radius, w / 2, h / 2));
+  ctx.fill();
+  ctx.restore();
+}
+
+/** Grain lines, a knot and end grain, seeded by the piece so they never swim. */
+function woodGrain(pen: Pen, w: number, h: number, seed: string): void {
+  const { ctx, camera } = pen;
   let hash = 0;
   for (let i = 0; i < seed.length; i += 1) hash = (hash * 31 + seed.charCodeAt(i)) >>> 0;
   ctx.save();
   ctx.beginPath();
   ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(0.07, h / 2));
   ctx.clip();
-  ctx.strokeStyle = 'rgba(92,58,30,0.28)';
   ctx.lineWidth = px(camera, 1);
-  for (let i = 0; i < 3; i += 1) {
+  for (let i = 0; i < 4; i += 1) {
     const off = ((hash >> (i * 5)) % 17) / 17 - 0.5;
-    const y = (i - 1) * h * 0.26;
+    const y = (i - 1.5) * h * 0.22;
+    ctx.strokeStyle = `rgba(92,58,30,${0.16 + (i % 2) * 0.12})`;
     ctx.beginPath();
-    ctx.moveTo(-w * 0.46 + off * 0.3, y);
-    ctx.bezierCurveTo(-w * 0.15, y + h * 0.12 * off, w * 0.15, y - h * 0.12 * off, w * (0.4 - off * 0.1), y);
+    ctx.moveTo(-w * 0.48 + off * 0.3, y);
+    ctx.bezierCurveTo(-w * 0.15, y + h * 0.14 * off, w * 0.15, y - h * 0.14 * off, w * (0.46 - off * 0.1), y + h * 0.05 * off);
     ctx.stroke();
   }
-  ctx.fillStyle = 'rgba(255,255,255,0.35)';
-  ctx.fillRect(-w / 2 + 0.04, h / 2 - Math.min(0.05, h * 0.25), w - 0.08, Math.min(0.03, h * 0.14));
+  if (w > 1.2 && h > 0.15) {
+    const kx = (((hash >> 7) % 100) / 100 - 0.5) * w * 0.5;
+    ctx.strokeStyle = 'rgba(92,58,30,0.35)';
+    ctx.beginPath();
+    ctx.ellipse(kx, 0, h * 0.3, h * 0.14, 0, 0, TAU);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(92,58,30,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(kx, 0, h * 0.12, h * 0.06, 0, 0, TAU);
+    ctx.fill();
+  }
+  // Darker end grain at both cut ends.
+  const cap = Math.min(0.06, w * 0.05);
+  ctx.fillStyle = 'rgba(92,58,30,0.2)';
+  ctx.fillRect(-w / 2, -h / 2, cap, h);
+  ctx.fillRect(w / 2 - cap, -h / 2, cap, h);
   ctx.restore();
+}
+
+function nail(pen: Pen, x: number, y: number, r: number): void {
+  const { ctx } = pen;
+  const head = ctx.createRadialGradient(x - r * 0.3, y + r * 0.3, 0, x, y, r);
+  head.addColorStop(0, '#F1F5F9');
+  head.addColorStop(1, '#475569');
+  ctx.fillStyle = head;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(30, 41, 59, 0.6)';
+  ctx.lineWidth = px(pen.camera, 0.8);
+  ctx.stroke();
+}
+
+function rivets(pen: Pen, w: number, h: number): void {
+  const r = Math.min(0.035, w * 0.14);
+  const long = h >= w;
+  const span = long ? h : w;
+  for (let s = -span / 2 + 0.18; s <= span / 2 - 0.17; s += 0.5) {
+    if (long) nail(pen, 0, s, r);
+    else nail(pen, s, 0, r);
+  }
+}
+
+function brushed(pen: Pen, w: number, h: number): void {
+  const { ctx, camera } = pen;
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h / 2, w, h, 0.05);
+  ctx.clip();
+  const sheen = ctx.createLinearGradient(-w / 2, -h / 2, w / 2, h / 2);
+  sheen.addColorStop(0, 'rgba(255,255,255,0)');
+  sheen.addColorStop(0.45, 'rgba(255,255,255,0.4)');
+  sheen.addColorStop(0.55, 'rgba(255,255,255,0)');
+  ctx.fillStyle = sheen;
+  ctx.fillRect(-w / 2, -h / 2, w, h);
+  ctx.strokeStyle = 'rgba(36,49,64,0.12)';
+  ctx.lineWidth = px(camera, 1);
+  ctx.beginPath();
+  const long = h >= w;
+  const span = long ? w : h;
+  for (let s = -span / 2 + 0.05; s < span / 2; s += 0.05) {
+    if (long) {
+      ctx.moveTo(s, -h / 2);
+      ctx.lineTo(s, h / 2);
+    } else {
+      ctx.moveTo(-w / 2, s);
+      ctx.lineTo(w / 2, s);
+    }
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Yellow and black stripes at both ends of a door. */
+function hazard(pen: Pen, w: number, h: number): void {
+  const { ctx } = pen;
+  const band = Math.min(0.3, h * 0.16);
+  ctx.save();
+  for (const end of [-1, 1]) {
+    const y0 = end > 0 ? h / 2 - band : -h / 2;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(-w / 2, y0, w, band);
+    ctx.clip();
+    ctx.fillStyle = '#FACC15';
+    ctx.fillRect(-w / 2, y0, w, band);
+    ctx.fillStyle = '#1B2430';
+    for (let s = -w - band; s < w + band; s += 0.14) {
+      ctx.beginPath();
+      ctx.moveTo(s, y0);
+      ctx.lineTo(s + 0.07, y0);
+      ctx.lineTo(s + 0.07 + band, y0 + band);
+      ctx.lineTo(s + band, y0 + band);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawConveyor(pen: Pen, piece: Piece): void {
+  const { ctx, camera, t } = pen;
+  const { w, h } = piece;
+  const power = piece.props.power ?? 4;
+  slab(pen, w, h, RUBBER, h / 2);
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(-w / 2 + 0.04, -h / 2 + 0.04, w - 0.08, h - 0.08, (h - 0.08) / 2);
+  ctx.clip();
+  // Tread cleats slide along the top and back along the bottom.
+  const offset = (t * power * 0.25) % 0.24;
+  ctx.fillStyle = 'rgba(244, 241, 234, 0.8)';
+  for (let x = -w / 2 - 0.24 + offset; x < w / 2 + 0.24; x += 0.24) {
+    ctx.fillRect(x, h / 2 - 0.09, 0.08, 0.06);
+    ctx.fillRect(-x - 0.08, -h / 2 + 0.03, 0.08, 0.06);
+  }
+  ctx.restore();
+  for (const end of [-1, 1]) {
+    const cx = (end * (w - h)) / 2;
+    const rr = h * 0.34;
+    const hub = ctx.createRadialGradient(cx - rr * 0.3, rr * 0.3, 0, cx, 0, rr);
+    hub.addColorStop(0, '#94A3B8');
+    hub.addColorStop(1, '#334155');
+    ctx.beginPath();
+    ctx.arc(cx, 0, rr, 0, TAU);
+    ctx.fillStyle = hub;
+    ctx.fill();
+    ctx.save();
+    ctx.translate(cx, 0);
+    ctx.rotate(-t * power * 1.2);
+    ctx.strokeStyle = '#F4F1EA';
+    ctx.lineWidth = px(camera, 1.4);
+    ctx.beginPath();
+    for (let i = 0; i < 3; i += 1) {
+      const a = (i / 3) * TAU;
+      ctx.moveTo(0, 0);
+      ctx.lineTo(Math.cos(a) * rr * 0.8, Math.sin(a) * rr * 0.8);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+  const glow = t ? 0.6 + 0.4 * Math.sin(t * 5) : 1;
+  ctx.save();
+  ctx.globalAlpha = glow;
+  arrowHead(ctx, w * 0.1, 0, 0.12, '#FB923C');
+  ctx.restore();
+  arrowHead(ctx, w * 0.1 - 0.2, 0, 0.09, 'rgba(234, 88, 12, 0.6)');
+}
+
+function drawSpring(pen: Pen, piece: Piece, pulse: number, hit: number): void {
+  const { ctx, camera, t } = pen;
+  const { w, h } = piece;
+  const kick = pulse >= 0 ? Math.exp(-pulse * 7) * Math.sin(pulse * 28) * 0.28 : 0;
+  const idle = t ? Math.sin(t * 3) * 0.015 : 0;
+  const reach = w / 2 - 0.08 + kick + idle;
+  const from = -w / 2 + 0.08;
+  ctx.save();
+  ctx.translate(from, 0);
+  slab(pen, 0.16, h * 0.95, BRASS, 0.04);
+  ctx.restore();
+  // A helix: back strands darker, front strands lighter, so the coil has depth.
+  const coils = 5;
+  const steps = 60;
+  const amp = h * 0.3;
+  for (const front of [false, true]) {
+    ctx.strokeStyle = front ? '#F59E0B' : '#9A3412';
+    ctx.lineWidth = px(camera, front ? 2.6 : 2.2);
+    ctx.beginPath();
+    let drawing = false;
+    for (let i = 0; i <= steps; i += 1) {
+      const f = i / steps;
+      const phase = f * coils * TAU;
+      const isFront = Math.cos(phase) > 0;
+      const x = from + f * (reach - from);
+      const y = Math.sin(phase) * amp;
+      if (isFront === front) {
+        if (!drawing) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+        drawing = true;
+      } else {
+        drawing = false;
+      }
+    }
+    ctx.stroke();
+    if (front && !pen.high) {
+      ctx.strokeStyle = 'rgba(255, 244, 222, 0.7)';
+      ctx.lineWidth = px(camera, 0.9);
+      ctx.stroke();
+    }
+  }
+  ctx.save();
+  ctx.translate(reach, 0);
+  slab(pen, 0.12, h * 0.95, BRASS, 0.03);
+  ctx.restore();
+  if (hit > 0.2 && !pen.high) {
+    const burst = ctx.createRadialGradient(reach + 0.1, 0, 0, reach + 0.1, 0, 0.5 * hit);
+    burst.addColorStop(0, `rgba(255, 237, 213, ${hit})`);
+    burst.addColorStop(1, 'rgba(251, 146, 60, 0)');
+    ctx.fillStyle = burst;
+    ctx.beginPath();
+    ctx.arc(reach + 0.1, 0, 0.5 * hit, 0, TAU);
+    ctx.fill();
+  }
+  arrowHead(ctx, reach + 0.17, 0, 0.12, hit > 0.2 ? '#EA580C' : '#C45C12');
+}
+
+function drawCannon(pen: Pen, piece: Piece, hit: number): void {
+  const { ctx, camera, t } = pen;
+  const { w, h } = piece;
+  const recoil = hit * 0.14;
+  ctx.save();
+  ctx.translate(-recoil, 0);
+  // Barrel: cylinder shading with reinforcing bands.
+  const bw = w * 0.82;
+  const bh = h * 0.62;
+  const barrel = ctx.createLinearGradient(0, bh / 2, 0, -bh / 2);
+  barrel.addColorStop(0, '#94A3B8');
+  barrel.addColorStop(0.3, '#F1F5F9');
+  barrel.addColorStop(0.55, '#64748B');
+  barrel.addColorStop(1, '#1E293B');
+  ctx.beginPath();
+  ctx.roundRect(-bw / 2 + 0.02, -bh / 2, bw, bh, [bh / 2, 0.04, 0.04, bh / 2]);
+  ctx.fillStyle = barrel;
+  ctx.fill();
+  ctx.strokeStyle = '#1B2430';
+  ctx.lineWidth = pen.ink;
+  ctx.stroke();
+  for (const f of [-0.2, 0.15, 0.36]) {
+    ctx.fillStyle = 'rgba(27, 36, 48, 0.55)';
+    ctx.fillRect(f * w, -bh / 2, 0.05, bh);
+  }
+  ctx.beginPath();
+  ctx.ellipse(bw / 2 + 0.02, 0, 0.05, bh * 0.44, 0, 0, TAU);
+  ctx.fillStyle = '#0B1016';
+  ctx.fill();
+  ctx.restore();
+  // Wheel with spokes.
+  const wx = -w * 0.18;
+  const wy = -h * 0.34;
+  const wr = h * 0.28;
+  const wheel = ctx.createRadialGradient(wx - wr * 0.3, wy + wr * 0.3, 0, wx, wy, wr);
+  wheel.addColorStop(0, '#A87B4F');
+  wheel.addColorStop(1, '#4A2E16');
+  ctx.beginPath();
+  ctx.arc(wx, wy, wr, 0, TAU);
+  ctx.fillStyle = wheel;
+  ctx.fill();
+  ctx.strokeStyle = '#2E1B0B';
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(wx, wy);
+  ctx.rotate(-hit * 1.2);
+  ctx.strokeStyle = '#E4B878';
+  ctx.lineWidth = px(camera, 1.4);
+  ctx.beginPath();
+  for (let i = 0; i < 6; i += 1) {
+    const a = (i / 6) * TAU;
+    ctx.moveTo(0, 0);
+    ctx.lineTo(Math.cos(a) * wr * 0.8, Math.sin(a) * wr * 0.8);
+  }
+  ctx.stroke();
+  ctx.restore();
+  ctx.beginPath();
+  ctx.arc(wx, wy, wr * 0.28, 0, TAU);
+  ctx.fillStyle = '#C8883A';
+  ctx.fill();
+  // An ember smolders at the fuse while it waits.
+  if (t && !pen.high) {
+    const fx = -w * 0.38 - recoil;
+    const fy = h * 0.3;
+    const flick = 0.7 + 0.3 * Math.sin(t * 17) * Math.sin(t * 7);
+    const ember = ctx.createRadialGradient(fx, fy, 0, fx, fy, 0.12);
+    ember.addColorStop(0, `rgba(255, 237, 213, ${flick})`);
+    ember.addColorStop(0.4, `rgba(251, 146, 60, ${0.7 * flick})`);
+    ember.addColorStop(1, 'rgba(251, 146, 60, 0)');
+    ctx.fillStyle = ember;
+    ctx.beginPath();
+    ctx.arc(fx, fy, 0.12, 0, TAU);
+    ctx.fill();
+  }
+  if (hit > 0.05) {
+    const flare = ctx.createRadialGradient(w / 2, 0, 0, w / 2, 0, 0.6 * hit + 0.1);
+    flare.addColorStop(0, `rgba(255,237,213,${hit})`);
+    flare.addColorStop(0.5, `rgba(251,146,60,${0.7 * hit})`);
+    flare.addColorStop(1, 'rgba(251,146,60,0)');
+    ctx.fillStyle = flare;
+    ctx.beginPath();
+    ctx.arc(w / 2, 0, 0.6 * hit + 0.1, 0, TAU);
+    ctx.fill();
+  }
+  arrowHead(ctx, w / 2 + 0.06, 0, 0.16, '#EA580C');
+}
+
+function drawPortal(pen: Pen, piece: Piece, all: Piece[], hit: number): void {
+  const { ctx, camera, t } = pen;
+  const { w, h } = piece;
+  const color = linkColor(piece.props.link ?? piece.uid);
+  const radius = Math.min(w, h) * 0.45;
+  if (!pen.high) {
+    ctx.save();
+    ctx.lineWidth = px(camera, 10 + hit * 8);
+    ctx.strokeStyle = hexAlpha(color, 0.18 + hit * 0.2);
+    ctx.beginPath();
+    ctx.roundRect(-w / 2, -h / 2, w, h, radius);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h / 2, w, h, radius);
+  ctx.clip();
+  const depth = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(w, h) * 0.6);
+  depth.addColorStop(0, pen.high ? '#FFFFFF' : '#1B1535');
+  depth.addColorStop(0.45, hexAlpha(color, 0.75 + hit * 0.25));
+  depth.addColorStop(1, 'rgba(255, 250, 242, 0.95)');
+  ctx.fillStyle = depth;
+  ctx.fillRect(-w / 2, -h / 2, w, h);
+  // Spiral arms turn inward.
+  ctx.save();
+  ctx.scale(w / Math.max(w, h), h / Math.max(w, h));
+  ctx.rotate(t * (1.6 + hit * 6));
+  const R = Math.max(w, h) * 0.5;
+  ctx.lineWidth = px(camera, 1.8);
+  for (let k = 0; k < 3; k += 1) {
+    ctx.strokeStyle = k % 2 ? 'rgba(255, 255, 255, 0.55)' : hexAlpha(color, 0.9);
+    ctx.beginPath();
+    for (let s = 0; s <= 24; s += 1) {
+      const f = s / 24;
+      const a = (k / 3) * TAU + f * 3.4;
+      const rr = R * (1 - f * 0.9);
+      if (s === 0) ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+      else ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.restore();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = px(camera, 3 + hit * 3);
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h / 2, w, h, radius);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = px(camera, 1);
+  ctx.stroke();
+  // Motes orbit the rim.
+  if (t && !pen.high) {
+    for (let i = 0; i < 5; i += 1) {
+      const a = t * 1.4 + (i / 5) * TAU;
+      const x = Math.cos(a) * w * 0.55;
+      const y = Math.sin(a) * h * 0.52;
+      const mote = ctx.createRadialGradient(x, y, 0, x, y, px(camera, 6));
+      mote.addColorStop(0, 'rgba(255,255,255,0.95)');
+      mote.addColorStop(0.4, hexAlpha(color, 0.7));
+      mote.addColorStop(1, hexAlpha(color, 0));
+      ctx.fillStyle = mote;
+      ctx.beginPath();
+      ctx.arc(x, y, px(camera, 6), 0, TAU);
+      ctx.fill();
+    }
+  }
+  const mark = portalRole(piece, all);
+  ctx.fillStyle = '#FFFFFF';
+  ctx.strokeStyle = '#FFFFFF';
+  if (mark === 'a') {
+    for (const y of [-0.22, 0, 0.22]) {
+      ctx.beginPath();
+      ctx.arc(0, y * h, 0.045, 0, TAU);
+      ctx.fill();
+    }
+  } else {
+    ctx.lineWidth = px(camera, 2);
+    ctx.beginPath();
+    ctx.moveTo(-w * 0.2, -h * 0.28);
+    ctx.lineTo(w * 0.2, -h * 0.28);
+    ctx.moveTo(-w * 0.2, 0);
+    ctx.lineTo(w * 0.2, 0);
+    ctx.moveTo(-w * 0.2, h * 0.28);
+    ctx.lineTo(w * 0.2, h * 0.28);
+    ctx.stroke();
+  }
+}
+
+function drawSwitch(pen: Pen, piece: Piece, on: boolean, hit: number): void {
+  const { ctx, camera, t } = pen;
+  const { w, h } = piece;
+  slab(pen, w, h * 0.45, STEEL, 0.06);
+  rivets(pen, w, h * 0.45);
+  const color = on ? '15, 118, 110' : '234, 88, 12';
+  const cy = h * 0.12;
+  const r = on ? h * 0.17 : h * 0.25;
+  if (!pen.high) {
+    const breathe = t ? 0.7 + 0.3 * Math.sin(t * 3) : 1;
+    const halo = ctx.createRadialGradient(0, cy, r * 0.5, 0, cy, r * 2.4);
+    halo.addColorStop(0, `rgba(${color}, ${0.4 * breathe + hit * 0.4})`);
+    halo.addColorStop(1, `rgba(${color}, 0)`);
+    ctx.fillStyle = halo;
+    ctx.beginPath();
+    ctx.arc(0, cy, r * 2.4, 0, TAU);
+    ctx.fill();
+  }
+  if (hit > 0.05) {
+    ctx.beginPath();
+    ctx.arc(0, cy, h * (0.3 + (1 - hit) * 0.5), 0, TAU);
+    ctx.strokeStyle = `rgba(15,118,110,${hit})`;
+    ctx.lineWidth = px(camera, 2.5);
+    ctx.stroke();
+  }
+  const dome = ctx.createRadialGradient(-r * 0.35, cy + r * 0.35, 0, 0, cy, r);
+  dome.addColorStop(0, on ? '#99F6E4' : '#FED7AA');
+  dome.addColorStop(0.5, on ? '#14B8A6' : '#F97316');
+  dome.addColorStop(1, on ? '#0F766E' : '#C2410C');
+  ctx.beginPath();
+  ctx.arc(0, cy, r, 0, TAU);
+  ctx.fillStyle = dome;
+  ctx.fill();
+  ctx.lineWidth = pen.ink;
+  ctx.strokeStyle = '#1B2430';
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(-r * 0.35, cy + r * 0.38, r * 0.2, 0, TAU);
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.fill();
 }
 
 function portalRole(piece: Piece, all: Piece[]): 'a' | 'b' {
@@ -1111,14 +2340,31 @@ function portalRole(piece: Piece, all: Piece[]): 'a' | 'b' {
   return index <= 0 ? 'a' : 'b';
 }
 
-function drawOpenDoor(ctx: CanvasRenderingContext2D, h: number): void {
-  ctx.fillStyle = '#8AA0B4';
-  ctx.fillRect(-0.08, h / 2 - 0.12, 0.16, 0.16);
-  ctx.fillRect(-0.08, -h / 2, 0.16, 0.16);
+function drawOpenDoor(pen: Pen, w: number, h: number): void {
+  const { ctx } = pen;
+  for (const end of [-1, 1]) {
+    ctx.save();
+    ctx.translate(0, end * (h / 2 - 0.1));
+    slab(pen, Math.max(w, 0.2), 0.2, STEEL, 0.03);
+    ctx.restore();
+  }
+  const lamp = ctx.createRadialGradient(0, h / 2 - 0.1, 0, 0, h / 2 - 0.1, 0.14);
+  lamp.addColorStop(0, 'rgba(153, 246, 228, 1)');
+  lamp.addColorStop(0.4, 'rgba(15, 118, 110, 0.8)');
+  lamp.addColorStop(1, 'rgba(15, 118, 110, 0)');
+  ctx.fillStyle = lamp;
+  ctx.beginPath();
+  ctx.arc(0, h / 2 - 0.1, 0.14, 0, TAU);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(36, 49, 64, 0.3)';
+  ctx.lineWidth = px(pen.camera, 1);
+  ctx.setLineDash([px(pen.camera, 3), px(pen.camera, 3)]);
+  ctx.strokeRect(-w / 2, -h / 2 + 0.2, w, h - 0.4);
+  ctx.setLineDash([]);
 }
 
 function drawShards(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-  ctx.fillStyle = 'rgba(31,111,120,0.35)';
+  ctx.fillStyle = 'rgba(31,111,120,0.3)';
   ctx.beginPath();
   ctx.moveTo(-w * 0.2, 0);
   ctx.lineTo(-w * 0.05, h * 0.2);
@@ -1129,118 +2375,38 @@ function drawShards(ctx: CanvasRenderingContext2D, w: number, h: number): void {
   ctx.lineTo(w * 0.28, -h * 0.08);
   ctx.lineTo(w * 0.18, h * 0.16);
   ctx.fill();
-}
-
-function plank(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-  top: string,
-  bottom: string,
-  stroke: string,
-  radius: number,
-): void {
-  const gradient = ctx.createLinearGradient(0, h / 2, 0, -h / 2);
-  gradient.addColorStop(0, top);
-  gradient.addColorStop(1, bottom);
+  ctx.fillStyle = 'rgba(31,111,120,0.18)';
   ctx.beginPath();
-  ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(radius, w / 2, h / 2));
-  ctx.fillStyle = gradient;
+  ctx.moveTo(-w * 0.42, -h * 0.1);
+  ctx.lineTo(-w * 0.34, h * 0.12);
+  ctx.lineTo(-w * 0.3, -h * 0.2);
   ctx.fill();
-  ctx.strokeStyle = stroke;
-  ctx.stroke();
 }
 
-function shadow(ctx: CanvasRenderingContext2D, w: number, h: number): void {
-  ctx.save();
-  ctx.translate(0.06, -0.1);
-  ctx.fillStyle = 'rgba(48, 24, 12, 0.16)';
-  ctx.beginPath();
-  ctx.roundRect(-w / 2, -h / 2, w, h, 0.08);
-  ctx.fill();
-  ctx.translate(-0.02, 0.03);
-  ctx.fillStyle = 'rgba(48, 24, 12, 0.08)';
-  ctx.beginPath();
-  ctx.roundRect(-w / 2, -h / 2, w, h, 0.1);
-  ctx.fill();
-  ctx.restore();
-}
-
-/** Three glowing beads ride the predicted path so its direction reads without text. */
-function travelBeads(ctx: CanvasRenderingContext2D, points: { x: number; y: number }[], time: number): void {
-  if (points.length < 2) return;
-  let total = 0;
-  const lengths: number[] = [];
-  for (let i = 1; i < points.length; i += 1) {
-    const a = points[i - 1];
-    const b = points[i];
-    if (!a || !b) continue;
-    const distance = Math.hypot(b.x - a.x, b.y - a.y);
-    lengths.push(distance);
-    total += distance;
-  }
-  if (total < 0.05) return;
-  for (let bead = 0; bead < 3; bead += 1) {
-    let dist = (time * 2.4 + (bead * total) / 3) % total;
-    for (let i = 0; i < lengths.length; i += 1) {
-      const length = lengths[i] ?? 0;
-      if (dist > length) {
-        dist -= length;
-        continue;
-      }
-      const a = points[i];
-      const b = points[i + 1];
-      if (!a || !b) break;
-      const t = length === 0 ? 0 : dist / length;
-      const x = a.x + (b.x - a.x) * t;
-      const y = a.y + (b.y - a.y) * t;
-      const glow = ctx.createRadialGradient(x, y, 0, x, y, 0.22);
-      glow.addColorStop(0, 'rgba(255, 248, 236, 0.95)');
-      glow.addColorStop(0.4, 'rgba(234, 88, 12, 0.7)');
-      glow.addColorStop(1, 'rgba(234, 88, 12, 0)');
-      ctx.fillStyle = glow;
-      ctx.beginPath();
-      ctx.arc(x, y, 0.22, 0, TAU);
-      ctx.fill();
-      break;
-    }
-  }
-}
-
-let grainCanvas: HTMLCanvasElement | null = null;
-
-function grainPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
-  if (!grainCanvas) {
-    grainCanvas = document.createElement('canvas');
-    grainCanvas.width = 128;
-    grainCanvas.height = 128;
-    const grain = grainCanvas.getContext('2d');
-    if (!grain) return null;
-    const image = grain.createImageData(128, 128);
-    let seed = 214013;
-    for (let i = 0; i < image.data.length; i += 4) {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      const value = seed & 255;
-      image.data[i] = value;
-      image.data[i + 1] = value;
-      image.data[i + 2] = value;
-      image.data[i + 3] = 255;
-    }
-    grain.putImageData(image, 0, 0);
-  }
-  return ctx.createPattern(grainCanvas, 'repeat');
-}
-
-function field(ctx: CanvasRenderingContext2D, w: number, h: number, fill: string, stroke: string): void {
+/** A glowing field with a soft inner light and a dashed boundary. */
+function field(pen: Pen, w: number, h: number, rgb: string, alpha: number): void {
+  const { ctx, camera } = pen;
   ctx.beginPath();
   ctx.roundRect(-w / 2, -h / 2, w, h, 0.12);
-  ctx.fillStyle = fill;
+  const inner = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(w, h) * 0.6);
+  inner.addColorStop(0, `rgba(${rgb}, ${alpha * 1.6})`);
+  inner.addColorStop(1, `rgba(${rgb}, ${alpha * 0.6})`);
+  ctx.fillStyle = inner;
   ctx.fill();
   ctx.save();
   ctx.setLineDash([0.12, 0.08]);
-  ctx.strokeStyle = stroke;
+  ctx.lineDashOffset = pen.t ? -pen.t * 0.3 : 0;
+  ctx.strokeStyle = `rgb(${rgb})`;
+  ctx.lineWidth = px(camera, 1.6);
   ctx.stroke();
   ctx.restore();
+  if (!pen.high) {
+    ctx.save();
+    ctx.strokeStyle = `rgba(${rgb}, 0.15)`;
+    ctx.lineWidth = px(camera, 6);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 function arrowHead(ctx: CanvasRenderingContext2D, x: number, y: number, size: number, fill: string): void {
@@ -1271,25 +2437,103 @@ function chevrons(ctx: CanvasRenderingContext2D, span: number, along: 'x' | 'y',
   ctx.stroke();
 }
 
-function worldText(ctx: CanvasRenderingContext2D, text: string, size: number, color: string): void {
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+
+/** Three glowing beads ride the predicted path so its direction reads without text. */
+function travelBeads(ctx: CanvasRenderingContext2D, points: Point[], time: number): void {
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (a && b) total += Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  if (total < 0.05) return;
+  const heads = [0, 1, 2].map((bead) => (time * 2.4 + (bead * total) / 3) % total);
+  walkPath(points, total / 240, 0, (x, y, _angle, along) => {
+    for (const head of heads) {
+      if (Math.abs(along - head) > total / 480) continue;
+      const glow = ctx.createRadialGradient(x, y, 0, x, y, 0.24);
+      glow.addColorStop(0, 'rgba(255, 248, 236, 0.95)');
+      glow.addColorStop(0.4, 'rgba(234, 88, 12, 0.7)');
+      glow.addColorStop(1, 'rgba(234, 88, 12, 0)');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(x, y, 0.24, 0, TAU);
+      ctx.fill();
+    }
+  });
+}
+
+/** Calls back at even spacing along a polyline, with the heading and distance so far. */
+function walkPath(
+  points: Point[],
+  spacing: number,
+  offset: number,
+  visit: (x: number, y: number, angle: number, along: number, total: number) => void,
+): void {
+  if (points.length < 2 || spacing <= 0) return;
+  let total = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (a && b) total += Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  let next = offset;
+  let walked = 0;
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    if (!a || !b) continue;
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    if (length <= 0) continue;
+    const angle = Math.atan2(b.y - a.y, b.x - a.x);
+    while (next <= walked + length) {
+      const f = (next - walked) / length;
+      visit(a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f, angle, next, total);
+      next += spacing;
+    }
+    walked += length;
+  }
+}
+
+let grainCanvas: HTMLCanvasElement | null = null;
+
+function grainPattern(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  if (!grainCanvas) {
+    grainCanvas = document.createElement('canvas');
+    grainCanvas.width = 128;
+    grainCanvas.height = 128;
+    const grain = grainCanvas.getContext('2d');
+    if (!grain) return null;
+    const image = grain.createImageData(128, 128);
+    let seed = 214013;
+    for (let i = 0; i < image.data.length; i += 4) {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      const value = seed & 255;
+      image.data[i] = value;
+      image.data[i + 1] = value;
+      image.data[i + 2] = value;
+      image.data[i + 3] = 255;
+    }
+    grain.putImageData(image, 0, 0);
+  }
+  return ctx.createPattern(grainCanvas, 'repeat');
+}
+
+function worldText(ctx: CanvasRenderingContext2D, text: string, size: number, color: string, weight = 600): void {
   ctx.save();
   ctx.scale(1, -1);
   ctx.fillStyle = color;
-  ctx.font = `600 ${size}px Outfit, sans-serif`;
+  ctx.font = `${weight} ${size}px Outfit, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(text, 0, size * 0.15);
   ctx.restore();
 }
 
-function strokePath(
-  ctx: CanvasRenderingContext2D,
-  points: { x: number; y: number }[],
-  color: string,
-  width: number,
-  dash?: number[],
-  dashOffset = 0,
-): void {
+function strokePath(ctx: CanvasRenderingContext2D, points: Point[], color: string, width: number, dash?: number[], dashOffset = 0): void {
   if (points.length < 2) return;
   ctx.beginPath();
   const first = points[0];
@@ -1315,13 +2559,24 @@ export function linkColor(link: string): string {
   return colors[hash % colors.length] ?? '#EA580C';
 }
 
-function hexAlpha(hex: string, alpha: number): string {
-  const value = hex.replace('#', '');
+/** Accepts #RRGGBB, or an rgb()/rgba() string whose alpha is replaced. */
+function hexAlpha(color: string, alpha: number): string {
+  if (color.startsWith('rgb')) {
+    const parts = color.replace(/rgba?\(|\)/g, '').split(',').slice(0, 3).join(',');
+    return `rgba(${parts},${alpha})`;
+  }
+  const value = color.replace('#', '');
   if (value.length !== 6) return `rgba(234,88,12,${alpha})`;
   const r = parseInt(value.slice(0, 2), 16);
   const g = parseInt(value.slice(2, 4), 16);
   const b = parseInt(value.slice(4, 6), 16);
   return `rgba(${r},${g},${b},${alpha})`;
+}
+
+/** A stable pseudo-random number in [0, 1) for index i. */
+function hash01(i: number, salt: number): number {
+  const s = Math.sin(i * 127.1 + salt * 311.7) * 43758.5453;
+  return s - Math.floor(s);
 }
 
 function backOut(t: number): number {

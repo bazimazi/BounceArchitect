@@ -8,7 +8,7 @@ import { pointInObb } from '../physics/collide';
 import { createState, FIXED_DT, run, step, toSim, type SimEvent, type SimState } from '../physics/sim';
 import { fitCamera, screenToWorld, type Camera } from '../render/camera';
 
-export type ParticleKind = 'dot' | 'spark' | 'ring' | 'shard' | 'confetti' | 'puff';
+export type ParticleKind = 'dot' | 'spark' | 'ring' | 'shard' | 'confetti' | 'puff' | 'star' | 'ember';
 
 export interface Particle {
   kind: ParticleKind;
@@ -47,10 +47,14 @@ export interface RenderFx {
   /** 0 when the level has just opened, 1 once the iris is fully open. */
   iris: number;
   flash: { color: string; life: number; max: number } | null;
+  /** The sunburst behind a solved ring. Age in seconds. */
+  rays: { x: number; y: number; age: number } | null;
+  /** Seconds since the last launch, for the launch kick. Negative when idle. */
+  launched: number;
 }
 
 export function emptyFx(): RenderFx {
-  return { balls: new Map(), pulses: new Map(), spawns: new Map(), modeBlend: 0, iris: 1, flash: null };
+  return { balls: new Map(), pulses: new Map(), spawns: new Map(), modeBlend: 0, iris: 1, flash: null, rays: null, launched: -1 };
 }
 
 const CONFETTI = ['#EA580C', '#F59E0B', '#0F766E', '#1D4ED8', '#BE185D', '#6D28D9', '#FDE68A'];
@@ -560,6 +564,8 @@ export class Session {
     this.fx.balls = new Map();
     this.fx.pulses = new Map();
     this.fx.flash = null;
+    this.fx.rays = null;
+    this.fx.launched = 0;
     this.hitStop = 0;
     this.punch = 0;
     this.winAt = this.reducedMotion ? -1 : this.predictWin();
@@ -568,6 +574,7 @@ export class Session {
     for (const start of this.starts) {
       this.ring(start.x, start.y, 0.55, '#EA580C', 0.45);
       this.sparks(start.x, start.y, 0, 1, 6, 2.6, '#FDBA74', Math.PI);
+      this.embers(start.x, start.y, 8, '#FDBA74', 2.2);
     }
     this.queue('launch');
   }
@@ -585,6 +592,8 @@ export class Session {
     this.reported = false;
     this.winAt = -1;
     this.fx.flash = null;
+    this.fx.rays = null;
+    this.fx.launched = -1;
     this.markPreview();
   }
 
@@ -830,7 +839,12 @@ export class Session {
       if (!this.reducedMotion) {
         this.shake = 0.5;
         this.fx.flash = { color: '255, 244, 214', life: 0.5, max: 0.5 };
-        for (const goal of this.goals) this.confetti(goal.x, goal.y, 46);
+        for (const goal of this.goals) {
+          this.confetti(goal.x, goal.y, 46);
+          this.stars(goal.x, goal.y, 14, 6);
+        }
+        const goal = this.goals[this.goals.length - 1];
+        if (goal) this.fx.rays = { x: goal.x, y: goal.y, age: 0 };
       }
       return;
     }
@@ -894,6 +908,7 @@ export class Session {
       if (event.note === 'bouncer') {
         this.ring(event.x, event.y, 0.9, '#EA580C', 0.38);
         this.sparks(event.x, event.y, nx, ny, 9, 5, '#FB923C', 1.3);
+        this.embers(event.x, event.y, 5, '#FDBA74', 2);
         this.shake = Math.max(this.shake, 0.22);
       } else {
         const strength = Math.min(1, impact / 9);
@@ -918,11 +933,13 @@ export class Session {
     if (event.kind === 'portal') {
       this.ring(event.x, event.y, 0.8, '#7C3AED', 0.45);
       this.sparks(event.x, event.y, 0, 1, 10, 3, '#A78BFA', Math.PI);
+      this.embers(event.x, event.y, 10, '#C4B5FD', 2.4);
       return;
     }
     if (event.kind === 'switch') {
       this.ring(event.x, event.y, 0.9, '#0F766E', 0.45);
       this.sparks(event.x, event.y, 0, 1, 8, 3.5, '#5EEAD4', Math.PI);
+      this.embers(event.x, event.y, 6, '#99F6E4', 1.8);
       this.hitStop = 0.05;
       return;
     }
@@ -947,6 +964,7 @@ export class Session {
       this.ring(event.x, event.y, 1.6, '#0F766E', 0.6);
       this.ring(event.x, event.y, 1.0, '#F59E0B', 0.45);
       this.sparks(event.x, event.y, 0, 1, 16, 5, '#FCD34D', Math.PI);
+      this.stars(event.x, event.y, 8, 4);
     }
   }
 
@@ -985,6 +1003,11 @@ export class Session {
       fx.flash.life -= dt;
       if (fx.flash.life <= 0) fx.flash = null;
     }
+    if (fx.rays) {
+      fx.rays.age += dt;
+      if (fx.rays.age > 3.2) fx.rays = null;
+    }
+    if (fx.launched >= 0) fx.launched = fx.launched > 2 ? -1 : fx.launched + dt;
     if (this.mode === 'build') this.punch = Math.max(0, this.punch - dt * 2.4);
   }
 
@@ -1194,10 +1217,32 @@ export class Session {
     }
   }
 
+  /** Twinkling four-point stars thrown upward, for the best moments. */
+  private stars(x: number, y: number, count: number, speed: number): void {
+    if (this.reducedMotion) return;
+    for (let i = 0; i < count; i += 1) {
+      const angle = (i / count) * Math.PI * 2 + Math.random() * 0.4;
+      const v = speed * (0.45 + Math.random() * 0.7);
+      const color = i % 3 === 0 ? '#FFFFFF' : i % 3 === 1 ? '#FCD34D' : '#FDBA74';
+      this.push('star', x, y, Math.cos(angle) * v, Math.sin(angle) * v + 1.5, 0.9 + Math.random() * 0.6, color, 0.12 + Math.random() * 0.1, Math.random() * 6, (Math.random() - 0.5) * 8, 3, 2.2);
+    }
+  }
+
+  /** Soft glowing motes that drift up and fade. */
+  private embers(x: number, y: number, count: number, color: string, speed: number): void {
+    if (this.reducedMotion) return;
+    for (let i = 0; i < count; i += 1) {
+      const angle = Math.random() * Math.PI * 2;
+      const v = speed * (0.3 + Math.random() * 0.7);
+      this.push('ember', x, y, Math.cos(angle) * v, Math.sin(angle) * v, 0.6 + Math.random() * 0.5, color, 0.05 + Math.random() * 0.05, 0, 0, -1.2, 2.5);
+    }
+  }
+
   /** Spawn pop for a freshly placed piece, with dust at its ends. */
   private popIn(piece: Piece): void {
     this.fx.spawns.set(piece.uid, 0);
     if (this.reducedMotion) return;
+    this.ring(piece.x, piece.y, Math.max(piece.w, piece.h) * 0.62, 'rgba(234, 88, 12, 0.7)', 0.4);
     const cos = Math.cos(piece.rot);
     const sin = Math.sin(piece.rot);
     for (const end of [-0.5, 0.5]) {
